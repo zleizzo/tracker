@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tracker</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Ccircle cx=%2716%27 cy=%2716%27 r=%2714%27 fill=%27%232a78d6%27/%3E%3Cpath d=%27M16 8v8l5 3%27 stroke=%27white%27 stroke-width=%273%27 stroke-linecap=%27round%27 fill=%27none%27/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#overview"><span class="brand-dot"></span>Tracker</a>
+  <nav class="tabs" id="tabs">
+    <a href="#overview" data-view="overview">Overview</a>
+    <a href="#timeline" data-view="timeline">Timeline</a>
+    <a href="#plan" data-view="plan">Plan</a>
+    <a href="#projects" data-view="projects">Projects</a>
+    <a href="#sort" data-view="sort">Sort</a>
+    <a href="#trends" data-view="trends">Trends</a>
+    <a href="#settings" data-view="settings">Settings</a>
+  </nav>
+  <div class="status" id="status" title="Daemon status"></div>
+  <button id="theme-toggle" class="icon-btn" title="Toggle light / dark" aria-label="Toggle theme">◐</button>
+</header>
+
+<section class="filters" id="filters">
+  <label class="f">Range
+    <select id="f-range">
+      <option value="today">Today</option>
+      <option value="yesterday">Yesterday</option>
+      <option value="week">This week</option>
+      <option value="7">Last 7 days</option>
+      <option value="30">Last 30 days</option>
+      <option value="90">Last 90 days</option>
+      <option value="month">This month</option>
+      <option value="custom">Custom…</option>
+    </select>
+  </label>
+  <span class="f custom" id="f-custom" hidden>
+    <input type="date" id="f-from"> <span class="dash">–</span> <input type="date" id="f-to">
+  </span>
+  <label class="f">Project <select id="f-project"><option value="">All</option></select></label>
+  <label class="f">Category
+    <select id="f-category">
+      <option value="">All</option>
+      <option value="productive">Productive</option>
+      <option value="neutral">Neutral</option>
+      <option value="distracting">Distracting</option>
+      <option value="switching">Context switching</option>
+    </select>
+  </label>
+  <label class="f">Hours
+    <input type="number" id="f-h0" min="0" max="23" value="0" aria-label="From hour"> <span class="dash">–</span>
+    <input type="number" id="f-h1" min="1" max="24" value="24" aria-label="To hour">
+  </label>
+  <div class="f weekdays" id="f-weekdays" role="group" aria-label="Weekdays"></div>
+  <button id="f-reset" class="btn ghost small">Reset</button>
+</section>
+
+<main id="main" class="main"></main>
+
+<div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+<div id="modal-root"></div>
+<div id="toast" class="toast" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>

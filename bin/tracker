@@ -1,0 +1,17 @@
+#!/bin/sh
+# Entry point. Finds a working python3 (the Xcode shim at /usr/bin/python3 fails until the
+# Xcode license is accepted, so prefer real interpreters) and runs the tracker CLI.
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+PY="${TRACKER_PYTHON:-}"
+if [ -z "$PY" ]; then
+  for c in "$HOME/anaconda3/bin/python3" "$HOME/miniconda3/bin/python3" "$HOME/miniforge3/bin/python3" \
+           /opt/homebrew/bin/python3 /usr/local/bin/python3 \
+           /Library/Frameworks/Python.framework/Versions/Current/bin/python3 /usr/bin/python3; do
+    if [ -x "$c" ] && "$c" -c 'import sqlite3' >/dev/null 2>&1; then PY="$c"; break; fi
+  done
+fi
+if [ -z "$PY" ]; then
+  echo "tracker: no working python3 found; set TRACKER_PYTHON=/path/to/python3" >&2
+  exit 1
+fi
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m tracker.cli "$@"
