@@ -135,3 +135,7 @@ TRACKER_DB=/tmp/demo.db bin/tracker serve --port 7899             # dashboard on
 
 Environment: `TRACKER_DB` (database path), `TRACKER_DATA_DIR`, `TRACKER_PYTHON` (interpreter for the
 CLI; the `/usr/bin/python3` shim is skipped automatically when the Xcode license is unaccepted).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
