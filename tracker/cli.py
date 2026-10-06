@@ -135,6 +135,7 @@ If you rebuild the daemon later, macOS treats it as a new app: re-enable it unde
 
 
 def cmd_uninstall(args):
+    _clear_focus_proxy()
     bootout(DAEMON_LABEL)
     bootout(DASH_LABEL)
     for label in (DAEMON_LABEL, DASH_LABEL):
@@ -154,7 +155,20 @@ def cmd_start(args):
     cmd_status(args)
 
 
+def _clear_focus_proxy():
+    try:
+        from . import focus
+        with closing(db.connect()) as conn:
+            port = int(db.get_settings(conn).get("dashboard_port") or 7898)
+        changed = focus.clear_pac(focus.Enforcer(port).is_ours)
+        if changed:
+            print(f"cleared focus proxy config on: {', '.join(changed)}")
+    except Exception as e:  # noqa: BLE001
+        print(f"warning: could not clear focus proxy config: {e}")
+
+
 def cmd_stop(args):
+    _clear_focus_proxy()
     bootout(DAEMON_LABEL)
     bootout(DASH_LABEL)
     print("stopped daemon and dashboard (they will start again at login; `tracker uninstall` removes them)")
@@ -297,6 +311,69 @@ def cmd_pause(args):
     print("resumed" if args.resume else "paused (the daemon picks this up within 10s)")
 
 
+def cmd_focus(args):
+    from . import focus
+    sub = args.focus_cmd
+    with closing(db.connect()) as conn:
+        port = int(db.get_settings(conn).get("dashboard_port") or 7898)
+        enforcer = focus.Enforcer(port)
+        if sub == "start":
+            try:
+                s = focus.start_session(conn, args.mode, args.minutes, args.lock)
+            except ValueError as e:
+                sys.exit(f"error: {e}")
+            enforcer.tick()
+            st = enforcer.state
+            print(f"focus ({s['mode']}) until {datetime.fromtimestamp(s['end']):%H:%M}: blocking {len(st['block'])} site(s), {len(st['apps'])} app(s)"
+                  + (f"; allowing only {len(st['allow'])} site(s)" if s["mode"] == "whitelist" else "") + ("  [locked]" if s["locked"] else ""))
+            if not port_open(port):
+                print("warning: the dashboard is not running, so the proxy config will not be served or kept applied. Run `tracker start`.")
+        elif sub == "stop":
+            try:
+                s = focus.stop_session(conn, force=args.force)
+            except ValueError as e:
+                sys.exit(f"error: {e} (use --force)")
+            enforcer.tick()
+            print("focus session stopped" if s else "no focus session was running")
+        elif sub == "extend":
+            try:
+                s = focus.extend_session(conn, args.minutes)
+            except ValueError as e:
+                sys.exit(f"error: {e}")
+            enforcer.tick()
+            print(f"extended until {datetime.fromtimestamp(s['end']):%H:%M}")
+        elif sub == "add":
+            try:
+                row = focus.add_site(conn, args.list, args.pattern)
+            except ValueError as e:
+                sys.exit(f"error: {e}")
+            enforcer.tick()
+            print(f"added {row['pattern']} to the {args.list} list")
+        elif sub == "remove":
+            cur = conn.execute("DELETE FROM focus_sites WHERE list = ? AND lower(pattern) = lower(?)", (args.list, args.pattern.strip()))
+            conn.commit()
+            enforcer.tick()
+            print("removed" if cur.rowcount else "not found")
+        elif sub == "clear-proxy":
+            changed = focus.clear_pac(enforcer.is_ours)
+            print(f"proxy config cleared on: {', '.join(changed) or 'nothing (none of ours was applied)'}")
+        else:  # status / list
+            focus.close_expired(conn)
+            s = focus.active_session(conn)
+            lists = focus.get_lists(conn)
+            if s:
+                left = max(0, s["end"] - time.time())
+                print(f"focus: {s['mode']} until {datetime.fromtimestamp(s['end']):%H:%M} ({fmt_dur(left)} left){'  [locked]' if s['locked'] else ''}")
+            else:
+                print("focus: no session running")
+            print(f"  applied on: {', '.join(focus.applied_services(enforcer.is_ours)) or 'none'}")
+            print(f"  blacklist:  {', '.join(r['pattern'] for r in lists['block']) or '-'}")
+            print(f"  apps:       {', '.join(r['pattern'] for r in lists['app']) or '-'}")
+            print(f"  whitelist:  {', '.join(r['pattern'] for r in lists['allow']) or '-'}")
+            d = focus.distracting_from_rules(conn)
+            print(f"  distracting (from rules): {', '.join(d['domains'] + d['apps']) or '-'}")
+
+
 def cmd_log(args):
     path = os.path.join(LOG_DIR, "dashboard.log" if args.dashboard else "daemon.log")
     if not os.path.exists(path):
@@ -348,6 +425,25 @@ def main(argv=None):
     s.set_defaults(fn=cmd_pause, resume=False)
     s = sub.add_parser("resume", help="resume tracking")
     s.set_defaults(fn=cmd_pause, resume=True)
+    s = sub.add_parser("focus", help="website / app blocking sessions")
+    fs = s.add_subparsers(dest="focus_cmd")
+    f = fs.add_parser("start", help="start a focus session")
+    f.add_argument("--mode", choices=("blacklist", "distracting", "whitelist"), default="blacklist")
+    f.add_argument("--minutes", type=float, default=25)
+    f.add_argument("--lock", action="store_true", help="cannot be stopped early")
+    f = fs.add_parser("stop", help="stop the running session")
+    f.add_argument("--force", action="store_true", help="stop even if locked")
+    f = fs.add_parser("extend", help="extend the running session")
+    f.add_argument("minutes", type=float)
+    f = fs.add_parser("add", help="add a site or app to a list")
+    f.add_argument("list", choices=("block", "allow", "app"))
+    f.add_argument("pattern")
+    f = fs.add_parser("remove", help="remove a site or app from a list")
+    f.add_argument("list", choices=("block", "allow", "app"))
+    f.add_argument("pattern")
+    fs.add_parser("status", help="session, lists and where the proxy config is applied")
+    fs.add_parser("clear-proxy", help="emergency: remove our proxy config from all network services")
+    s.set_defaults(fn=cmd_focus, focus_cmd="status")
     s = sub.add_parser("log", help="show the daemon log")
     s.add_argument("-n", "--lines", type=int, default=40)
     s.add_argument("-f", "--follow", action="store_true")

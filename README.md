@@ -71,8 +71,30 @@ re-tick it under Accessibility.
 - **Trends**: per-day stacks by project and category, weekday × hour heatmap, by hour, by weekday,
   switches per day/hour. Combine with the filter row for questions like "how productive am I on
   Tuesday mornings on the thesis".
+- **Focus**: a website and app blocker that works at the network layer. Three modes: *blacklist*
+  (your own list of sites and apps), *distracting* (the blacklist plus every site or app your rules
+  sort as distracting) and *whitelist* (only the sites on your allow list can be reached). Pick a
+  duration, optionally lock the session so it cannot be stopped early, and start. Also from the
+  terminal: `bin/tracker focus start --mode distracting --minutes 45 --lock`.
 - **Settings**: idle threshold, context-switch detection parameters, backup folder, export CSV,
   daemon health (whether window titles and URLs are actually arriving).
+
+## How the blocker works (and why it holds)
+
+macOS Screen Time filters inside the browser and is easy to slip past. Tracker instead sets a
+proxy auto-config (PAC) on every network service for the length of the session (an admin user can
+do this without sudo). Browsers and most apps evaluate the PAC for every single request, so it
+does not matter what is cached, whether the window is incognito, whether Secure DNS is on, or
+whether you type the URL by hand: hosts on the block list (and all their subdomains) are routed to
+a local proxy on 127.0.0.1 that refuses the connection, and everything else goes direct. The
+dashboard re-applies the setting every few seconds while the session runs, so turning it off in
+System Settings only lasts until the next check, and restores the previous configuration when the
+session ends. Blocked apps are quit every few seconds. Escape hatches, deliberately in the
+terminal only: `bin/tracker focus stop --force` and `bin/tracker focus clear-proxy`.
+
+Caveats: a tab that is already showing a blocked page keeps it until it loads something new;
+whitelist mode limits every app that honours the system proxy, so add the domains your chat,
+music or mail apps need; command-line tools that ignore proxy settings are not affected.
 
 ## Plans and estimates
 
@@ -105,6 +127,7 @@ bin/tracker status | today [DATE] | dashboard | pause | resume | log [-f]
 bin/tracker export --from 2026-09-01 --to 2026-09-30 --out sept.csv
 curl 'http://127.0.0.1:7898/api/plan?date=2026-10-03'            # the whole JSON API is plain GET/POST
 bin/tracker backup "~/Library/Mobile Documents/com~apple~CloudDocs/Tracker"   # sets the folder and copies now
+bin/tracker focus add block youtube.com | focus add app Discord | focus status | focus stop
 bin/tracker set idle_threshold_seconds 180
 bin/tracker start | stop | restart | uninstall
 ```

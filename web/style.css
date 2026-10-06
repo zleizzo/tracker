@@ -330,3 +330,18 @@ table.data td.trunc { max-width: 380px; overflow: hidden; text-overflow: ellipsi
 .remember label { display: grid; grid-template-columns: 18px 64px 1fr 56px; gap: 8px; align-items: center; font-size: 13px; color: var(--ink); }
 .remember label .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .remember label .secs { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* focus */
+.focus-timer .big { font-size: 34px; font-weight: 600; letter-spacing: -0.01em; }
+.mode-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.mode-card { text-align: left; display: grid; gap: 4px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--page); cursor: pointer; color: var(--ink); }
+.mode-card span { font-size: 13px; color: var(--ink-2); }
+.mode-card.on { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { border: 1px solid var(--border); background: var(--page); color: var(--ink-2); border-radius: 999px; padding: 4px 12px; cursor: pointer; font-size: 13px; }
+.chip.on { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.site-list { display: grid; gap: 4px; max-height: 260px; overflow: auto; }
+.site { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; background: var(--surface-2); font-size: 13px; }
+.site span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.site .x { opacity: 0.5; background: none; border: 0; cursor: pointer; color: var(--muted); }
+.site:hover .x { opacity: 1; }

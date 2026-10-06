@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from contextlib import closing
@@ -11,7 +12,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__, analytics, db
+from . import __version__, analytics, db, focus
 from .analytics import Filters, parse_time, range_bounds
 from .classify import BROWSERS, CATEGORIES, FIELD_SPECIFICITY
 
@@ -150,9 +151,11 @@ def api_status(conn, q, body):
         FROM segments""", (recent, recent, recent, *BROWSERS, recent, *BROWSERS))
     path = db.db_path()
     settings = db.get_settings(conn)
+    fstate = focus.effective_state(conn)
     return {
         "version": __version__,
         "now": now,
+        "focus": {"active": fstate["active"], "mode": fstate["mode"], "until": fstate["until"], "locked": fstate["locked"]},
         "daemon_running": daemon_running(),
         "paused": settings.get("paused") == "1",
         "last_segment": last,
@@ -590,6 +593,150 @@ def api_plan_clear(conn, q, body):
     return {"deleted": cur.rowcount}
 
 
+# -- focus (website / app blocking) ---------------------------------------------
+
+ENFORCER = None
+
+
+def _focus_payload(conn):
+    focus.close_expired(conn)
+    return {
+        "state": focus.effective_state(conn),
+        "session": focus.active_session(conn),
+        "lists": focus.get_lists(conn),
+        "distracting": focus.distracting_from_rules(conn),
+        "history": focus.history(conn),
+        "enforcer": ENFORCER.status if ENFORCER else None,
+        "recent_apps": [r["app"] for r in conn.execute(
+            "SELECT app, sum(end - start) AS s FROM segments WHERE kind = 'active' AND app IS NOT NULL AND end > ? GROUP BY app ORDER BY s DESC LIMIT 30",
+            (time.time() - 14 * 86400,))],
+        "network_services": focus.network_services(),
+    }
+
+
+def _enforce_now():
+    if ENFORCER:
+        ENFORCER.tick()
+
+
+@route("GET", r"/api/focus")
+def api_focus(conn, q, body):
+    return _focus_payload(conn)
+
+
+@route("POST", r"/api/focus/start")
+def api_focus_start(conn, q, body):
+    body = body or {}
+    try:
+        focus.start_session(conn, body.get("mode"), body.get("minutes") or 25, bool(body.get("locked")))
+    except ValueError as e:
+        raise ApiError(str(e))
+    conn.commit()
+    _enforce_now()
+    return _focus_payload(conn)
+
+
+@route("POST", r"/api/focus/stop")
+def api_focus_stop(conn, q, body):
+    try:
+        focus.stop_session(conn, force=bool((body or {}).get("force")))
+    except ValueError as e:
+        raise ApiError(str(e), 423)
+    _enforce_now()
+    return _focus_payload(conn)
+
+
+@route("POST", r"/api/focus/extend")
+def api_focus_extend(conn, q, body):
+    try:
+        focus.extend_session(conn, (body or {}).get("minutes") or 15)
+    except ValueError as e:
+        raise ApiError(str(e))
+    _enforce_now()
+    return _focus_payload(conn)
+
+
+@route("POST", r"/api/focus/sites")
+def api_focus_site_add(conn, q, body):
+    body = body or {}
+    try:
+        row = focus.add_site(conn, body.get("list"), body.get("pattern"))
+    except ValueError as e:
+        raise ApiError(str(e))
+    _enforce_now()
+    return row
+
+
+@route("DELETE", r"/api/focus/sites/(\d+)")
+def api_focus_site_delete(conn, q, body, sid):
+    out = _delete(conn, "focus_sites", int(sid))
+    _enforce_now()
+    return out
+
+
+@route("GET", r"/focus\.pac")
+def focus_pac(conn, q, body):
+    focus.close_expired(conn)
+    return Raw(focus.pac_text(focus.effective_state(conn)).encode("utf-8"), "application/x-ns-proxy-autoconfig")
+
+
+class BlockHandler(BaseHTTPRequestHandler):
+    """The proxy that blocked hosts are routed to. It refuses everything: 403 on CONNECT (HTTPS) and a
+    block page for plain HTTP. It never forwards traffic."""
+    protocol_version = "HTTP/1.1"
+    server_version = f"TrackerFocus/{__version__}"
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _state(self):
+        try:
+            with closing(db.connect()) as conn:
+                return focus.effective_state(conn)
+        except Exception:  # noqa: BLE001
+            return {"active": True, "mode": "?", "until": None}
+
+    def do_CONNECT(self):
+        self.send_response(403, "Blocked by Tracker focus")
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def _block(self):
+        page = focus.block_page(self._state(), self.path).encode("utf-8")
+        self.send_response(403, "Blocked by Tracker focus")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(page)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(page)
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = do_OPTIONS = do_PATCH = _block
+
+
+def start_focus_services(dashboard_port):
+    """Blocking proxy + enforcement loop, both as daemon threads inside the dashboard process."""
+    global ENFORCER
+    with closing(db.connect()) as conn:
+        proxy_port = int(db.get_settings(conn).get("focus_proxy_port") or 7897)
+    ENFORCER = focus.Enforcer(dashboard_port)
+    try:
+        ThreadingHTTPServer.allow_reuse_address = True
+        proxy = ThreadingHTTPServer(("127.0.0.1", proxy_port), BlockHandler)
+        proxy.daemon_threads = True
+        threading.Thread(target=proxy.serve_forever, name="focus-proxy", daemon=True).start()
+    except OSError as e:
+        print(f"focus proxy could not listen on 127.0.0.1:{proxy_port}: {e}", flush=True)
+
+    def loop():
+        while True:
+            ENFORCER.tick()
+            time.sleep(3 if ENFORCER.state.get("active") else 5)
+    threading.Thread(target=loop, name="focus-enforcer", daemon=True).start()
+    return ENFORCER
+
+
 # -- settings / control --------------------------------------------------------
 
 @route("GET", r"/api/settings")
@@ -740,6 +887,7 @@ def serve(port=None, host="127.0.0.1"):
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
     print(f"tracker dashboard listening on http://{host}:{port}/  (db: {db.db_path()})", flush=True)
+    start_focus_services(port)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

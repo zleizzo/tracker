@@ -241,7 +241,7 @@ function bindFilters() {
 function currentView() {
   const h = location.hash.replace(/^#/, '') || 'overview';
   const [view, ...rest] = h.split('/');
-  return { view: ['overview', 'timeline', 'plan', 'projects', 'sort', 'trends', 'settings'].includes(view) ? view : 'overview', arg: rest.join('/') };
+  return { view: ['overview', 'timeline', 'plan', 'focus', 'projects', 'sort', 'trends', 'settings'].includes(view) ? view : 'overview', arg: rest.join('/') };
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +513,7 @@ async function refreshStatus() {
     text = l.kind === 'active' ? `Tracking · ${l.app || '?'}${l.domain ? ' · ' + l.domain : ''}` : (l.kind === 'locked' ? 'Locked' : 'Idle');
   }
   box.append(el('span', { class: `dot ${cls}` }), text);
+  if (s.focus && s.focus.active) box.appendChild(el('a', { href: '#focus', class: 'pill', style: 'color:var(--ink);font-weight:600', text: `⦿ Focus · ${fmtDur(Math.max(0, s.focus.until - s.now), { minutesOnly: true })} left` }));
   const c = s.counts || {};
   if (s.daemon_running && c.active_recent > 0 && c.titles_recent === 0) {
     box.appendChild(el('a', { href: '#settings', class: 'pill', text: '⚠ no window titles — grant Accessibility', style: 'color:var(--bad)' }));
@@ -536,7 +537,7 @@ async function render() {
   try {
     if (!projectsCache.length || view === 'projects' || view === 'sort') projectsCache = (await api.get('/api/projects')).projects;
     syncFilterControls();
-    const node = await ({ overview: renderOverview, timeline: renderTimeline, plan: renderPlan, projects: renderProjects, sort: renderSort, trends: renderTrends, settings: renderSettings })[view](arg);
+    const node = await ({ overview: renderOverview, timeline: renderTimeline, plan: renderPlan, focus: renderFocus, projects: renderProjects, sort: renderSort, trends: renderTrends, settings: renderSettings })[view](arg);
     if (token !== renderToken) return;
     main.innerHTML = '';
     main.appendChild(node);
@@ -973,6 +974,116 @@ async function renderTimeline(arg) {
   return wrap;
 }
 
+// ---- focus (website / app blocking) -----------------------------------------
+const MODE_INFO = {
+  blacklist: { label: 'Blacklist', desc: 'Block the sites and apps on your blacklist.' },
+  distracting: { label: 'Distracting', desc: 'Block your blacklist plus everything your rules sort as distracting.' },
+  whitelist: { label: 'Whitelist', desc: 'Only the sites on your allow list can be reached. Blocked apps still apply.' },
+};
+async function renderFocus() {
+  const f = await api.get('/api/focus');
+  const st = f.state, sess = f.session, enf = f.enforcer || {};
+  const wrap = el('div');
+  const now = Date.now() / 1000;
+  const distractingDomains = f.distracting.domains, distractingApps = f.distracting.apps;
+  const counts = {
+    blacklist: `${f.lists.block.length} site${f.lists.block.length === 1 ? '' : 's'} · ${f.lists.app.length} app${f.lists.app.length === 1 ? '' : 's'}`,
+    distracting: `${new Set([...f.lists.block.map(r => r.pattern), ...distractingDomains]).size} sites · ${new Set([...f.lists.app.map(r => r.pattern), ...distractingApps]).size} apps`,
+    whitelist: `${f.lists.allow.length} allowed site${f.lists.allow.length === 1 ? '' : 's'}`,
+  };
+
+  // hero: running session or start form
+  const hero = el('div', { class: 'card', style: 'margin-bottom:16px' });
+  if (sess) {
+    const left = Math.max(0, sess.end - now), total = sess.end - sess.start;
+    hero.appendChild(el('div', { class: 'card-head' }, el('h2', { text: `Focus · ${MODE_INFO[sess.mode].label}` }), el('span', { class: 'sub', text: `ends ${fmtClock(sess.end)}${sess.locked ? ' · locked' : ''}` })));
+    hero.appendChild(el('div', { class: 'focus-timer' }, el('div', { class: 'big', text: fmtDur(left, { minutesOnly: true }) + ' left' }),
+      el('div', { class: 'meter', style: 'height:10px;margin:10px 0' }, el('i', { style: `width:${Math.min(100, 100 * (1 - left / total)).toFixed(1)}%` }))));
+    const blocking = sess.mode === 'whitelist' ? `Only ${st.allow.length} site${st.allow.length === 1 ? '' : 's'} allowed` : `Blocking ${st.block.length} site${st.block.length === 1 ? '' : 's'}`;
+    hero.appendChild(el('p', { class: 'muted', text: `${blocking} · ${st.apps.length} app${st.apps.length === 1 ? '' : 's'} kept closed` }));
+    const applied = enf.dry_run ? 'dry run (no proxy settings changed)' : (enf.applied ? `proxy config active on ${enf.services.join(', ')}` : 'proxy config not applied yet…');
+    hero.appendChild(el('p', { class: `small ${enf.last_error ? 'err' : 'muted'}`, text: enf.last_error ? `Enforcement error: ${enf.last_error}` : applied }));
+    hero.appendChild(el('div', { style: 'display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center' },
+      el('button', { class: 'btn', text: '+15 min', onclick: async () => { await api.post('/api/focus/extend', { minutes: 15 }); render(); } }),
+      el('button', { class: 'btn', text: '+30 min', onclick: async () => { await api.post('/api/focus/extend', { minutes: 30 }); render(); } }),
+      sess.locked ? el('span', { class: 'muted small', text: 'Locked: cannot be stopped before it ends (terminal escape hatch: tracker focus stop --force).' })
+        : el('button', { class: 'btn danger', text: 'Stop session', onclick: async () => { if (confirm('End the focus session now?')) { await api.post('/api/focus/stop', {}); toast('Focus session stopped'); render(); } } })));
+  } else {
+    hero.appendChild(el('div', { class: 'card-head' }, el('h2', { text: 'Start a focus session' }), el('span', { class: 'sub', text: 'blocks websites system-wide (every browser, incognito too) for a set time' })));
+    let mode = store('focusMode') || 'blacklist';
+    let minutes = store('focusMinutes') || 25;
+    const modeCards = el('div', { class: 'mode-cards' });
+    const customIn = el('input', { type: 'number', class: 'input', min: 1, max: 1440, value: minutes, style: 'width:80px' });
+    const chips = el('div', { class: 'chips' });
+    const lockCb = el('input', { type: 'checkbox' });
+    const drawModes = () => { modeCards.innerHTML = ''; for (const m of Object.keys(MODE_INFO)) modeCards.appendChild(el('button', { type: 'button', class: `mode-card ${mode === m ? 'on' : ''}`, onclick: () => { mode = m; store('focusMode', m); drawModes(); } }, el('b', { text: MODE_INFO[m].label }), el('span', { text: MODE_INFO[m].desc }), el('span', { class: 'muted small', text: counts[m] }))); };
+    const drawChips = () => { chips.innerHTML = ''; for (const m of [15, 25, 45, 60, 90, 120]) chips.appendChild(el('button', { type: 'button', class: `chip ${Number(minutes) === m ? 'on' : ''}`, text: m >= 60 ? `${Math.floor(m / 60)}h${m % 60 ? ' ' + (m % 60) + 'm' : ''}` : `${m}m`, onclick: () => { minutes = m; customIn.value = m; store('focusMinutes', m); drawChips(); } })); };
+    customIn.addEventListener('change', () => { minutes = Number(customIn.value) || 25; store('focusMinutes', minutes); drawChips(); });
+    drawModes(); drawChips();
+    hero.append(modeCards,
+      el('div', { style: 'display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px' }, el('span', { class: 'muted small', text: 'Duration' }), chips, customIn, el('span', { class: 'muted small', text: 'min' })),
+      el('label', { class: 'f', style: 'margin-top:10px;display:flex;gap:6px;align-items:center' }, lockCb, 'Lock it: no stopping early'),
+      el('div', { style: 'margin-top:12px;display:flex;gap:10px;align-items:center' },
+        el('button', { class: 'btn primary', text: 'Start focus', onclick: async () => {
+          if (mode === 'whitelist' && !f.lists.allow.length && !confirm('Your allow list is empty: every website would be blocked. Start anyway?')) return;
+          if (mode === 'blacklist' && !f.lists.block.length && !f.lists.app.length) { toast('Add something to the blacklist first', true); return; }
+          await api.post('/api/focus/start', { mode, minutes, locked: lockCb.checked }); toast('Focus started'); render(); refreshStatus();
+        } }),
+        enf.last_error ? el('span', { class: 'err small', text: enf.last_error }) : null));
+  }
+  wrap.appendChild(hero);
+
+  // lists
+  const grid = el('div', { class: 'grid' });
+  const listCard = (title, sub, which, rows, placeholder, datalist) => {
+    const c = el('div', { class: 'card' });
+    c.appendChild(el('div', { class: 'card-head' }, el('h2', { text: title }), el('span', { class: 'sub', text: sub })));
+    const ul = el('div', { class: 'site-list' });
+    if (!rows.length) ul.appendChild(el('div', { class: 'muted small', text: 'Nothing here yet.' }));
+    for (const r of rows) ul.appendChild(el('div', { class: 'site' }, el('span', { text: r.pattern }), el('button', { class: 'x', text: '✕', title: 'Remove', onclick: async () => { await api.del(`/api/focus/sites/${r.id}`); render(); } })));
+    const inp = el('input', { type: 'text', class: 'input', placeholder, style: 'flex:1', list: datalist ? `dl-${which}` : null });
+    const form = el('form', { class: 'inline-form', style: 'margin-top:10px', onsubmit: async e => { e.preventDefault(); if (!inp.value.trim()) return; try { await api.post('/api/focus/sites', { list: which, pattern: inp.value.trim() }); inp.value = ''; render(); } catch (err) { /* toast shown by api */ } } }, inp, el('button', { type: 'submit', class: 'btn small', text: 'Add' }));
+    if (datalist) form.appendChild(el('datalist', { id: `dl-${which}` }, datalist.map(v => el('option', { value: v }))));
+    c.append(ul, form);
+    return c;
+  };
+  grid.appendChild(listCard('Blacklist', 'sites blocked in blacklist and distracting modes', 'block', f.lists.block, 'youtube.com or a URL'));
+  grid.appendChild(listCard('Blocked apps', 'quit automatically while any session runs', 'app', f.lists.app, 'Discord', f.recent_apps));
+  grid.appendChild(listCard('Whitelist', 'the only sites reachable in whitelist mode (local network and Apple services always work)', 'allow', f.lists.allow, 'overleaf.com'));
+  const dcard = el('div', { class: 'card' });
+  dcard.appendChild(el('div', { class: 'card-head' }, el('h2', { text: 'Sorted as distracting' }), el('span', { class: 'sub', text: 'from your rules · added to the blacklist in distracting mode' })));
+  dcard.appendChild(distractingDomains.length || distractingApps.length
+    ? el('div', { class: 'site-list' }, [...distractingDomains, ...distractingApps].map(v => el('div', { class: 'site' }, el('span', { text: v }))))
+    : el('p', { class: 'muted small', text: 'No rules with the "distracting" category yet. Sort sites on the Sort tab and they show up here.' }));
+  dcard.appendChild(el('a', { href: '#sort', class: 'btn ghost small', text: 'Sort tab →', style: 'margin-top:10px;display:inline-block' }));
+  grid.appendChild(dcard);
+  wrap.appendChild(grid);
+
+  // history + how it works
+  const grid2 = el('div', { class: 'grid', style: 'margin-top:16px' });
+  if (f.history.length) {
+    grid2.appendChild(card({ title: 'Past sessions', span2: true, chart: () => dataTable([
+      { h: 'When', k: r => `${fmtDay(isoDate(new Date(r.start * 1000)))} ${fmtClock(r.start)}` },
+      { h: 'Mode', k: r => MODE_INFO[r.mode] ? MODE_INFO[r.mode].label : r.mode },
+      { h: 'Planned', k: r => fmtDur(r.planned_seconds), num: true },
+      { h: 'Actual', k: r => fmtDur(r.actual_seconds), num: true },
+      { h: 'Outcome', k: r => r.stopped_at == null ? el('span', { class: 'pill', text: 'running' }) : (r.stopped_early ? el('span', { class: 'pill', text: 'stopped early', style: 'color:var(--bad)' }) : el('span', { class: 'pill', text: 'completed' })) },
+      { h: 'Locked', k: r => r.locked ? 'yes' : '' },
+    ], f.history) }));
+  }
+  const how = el('div', { class: 'card span2' });
+  how.appendChild(el('div', { class: 'card-head' }, el('h2', { text: 'How blocking works' })));
+  how.appendChild(el('ul', { style: 'margin:0;padding-left:18px;color:var(--ink-2);display:grid;gap:4px' },
+    el('li', {}, 'While a session runs, a proxy auto-config is set on every network service (', el('code', { text: (f.network_services || []).join(', ') || 'none found' }), '). Every browser and most apps evaluate it for every request, so DNS caches, already-resolved addresses, incognito windows and typed URLs do not get around it.'),
+    el('li', {}, 'Blocked hosts are sent to a local proxy on 127.0.0.1 that refuses them; HTTPS pages show the browser\'s "proxy connection failed" error, plain HTTP shows a block page. Everything else goes direct and never touches the proxy.'),
+    el('li', {}, 'The setting is re-applied every few seconds, so switching it off in System Settings does not help; it is restored when the session ends (or with ', el('code', { text: 'tracker focus clear-proxy' }), ').'),
+    el('li', {}, 'Blocked apps are quit every few seconds while a session runs. In whitelist mode every app that uses the system proxy is limited to the allow list, so add the domains Slack, Spotify or your mail need.'),
+    el('li', {}, 'Tabs that were already open keep their current page until they load something new. Sites matching a domain include all its subdomains.')));
+  grid2.appendChild(how);
+  wrap.appendChild(grid2);
+  return wrap;
+}
+
 // ---- projects ---------------------------------------------------------------
 const ratioClass = r => (r == null ? '' : (r > 1.1 ? 'over' : (r < 0.9 ? 'under' : '')));
 const ratioText = r => (r == null ? '—' : `${r >= 1 ? '+' : '−'}${Math.round(Math.abs(r - 1) * 100)}%`);
@@ -1369,3 +1480,4 @@ render();
 refreshStatus();
 setInterval(refreshStatus, 30000);
 setInterval(() => { if (currentView().view === 'timeline' && state.date === todayIso() && !$('#modal-root').children.length) render(); }, 60000);
+setInterval(() => { if (currentView().view === 'focus' && !$('#modal-root').children.length && !document.activeElement.matches('input, select')) render(); }, 20000);

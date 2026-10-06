@@ -74,6 +74,21 @@ CREATE TABLE IF NOT EXISTS plan_blocks (
   created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_plan_blocks_day ON plan_blocks(day);
+CREATE TABLE IF NOT EXISTS focus_sessions (
+  id INTEGER PRIMARY KEY,
+  mode TEXT NOT NULL,               -- blacklist | distracting | whitelist
+  start REAL NOT NULL,
+  end REAL NOT NULL,                -- planned end (extended in place)
+  locked INTEGER NOT NULL DEFAULT 0,
+  stopped_at REAL,                  -- set when stopped early or when the session was closed
+  created_at REAL
+);
+CREATE TABLE IF NOT EXISTS focus_sites (
+  id INTEGER PRIMARY KEY,
+  list TEXT NOT NULL,               -- block | allow | app
+  pattern TEXT NOT NULL,
+  created_at REAL
+);
 CREATE TABLE IF NOT EXISTS assignments (
   id INTEGER PRIMARY KEY,
   start REAL NOT NULL,
@@ -97,6 +112,7 @@ DEFAULT_SETTINGS = {
     "dashboard_port": "7898",
     "backup_dir": "",                  # e.g. ~/Library/Mobile Documents/com~apple~CloudDocs/Tracker
     "paused": "0",
+    "focus_proxy_port": "7897",        # local port of the blocking proxy that blocked requests are sent to
 }
 
 CATEGORIES = ("productive", "neutral", "distracting")

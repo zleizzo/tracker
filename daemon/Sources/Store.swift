@@ -89,6 +89,21 @@ final class Store {
       created_at REAL
     );
     CREATE INDEX IF NOT EXISTS idx_plan_blocks_day ON plan_blocks(day);
+    CREATE TABLE IF NOT EXISTS focus_sessions (
+      id INTEGER PRIMARY KEY,
+      mode TEXT NOT NULL,
+      start REAL NOT NULL,
+      end REAL NOT NULL,
+      locked INTEGER NOT NULL DEFAULT 0,
+      stopped_at REAL,
+      created_at REAL
+    );
+    CREATE TABLE IF NOT EXISTS focus_sites (
+      id INTEGER PRIMARY KEY,
+      list TEXT NOT NULL,
+      pattern TEXT NOT NULL,
+      created_at REAL
+    );
     CREATE TABLE IF NOT EXISTS assignments (
       id INTEGER PRIMARY KEY,
       start REAL NOT NULL,
