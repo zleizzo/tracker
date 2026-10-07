@@ -75,7 +75,13 @@ re-tick it under Accessibility.
   (your own list of sites and apps), *distracting* (the blacklist plus every site or app your rules
   sort as distracting) and *whitelist* (only the sites on your allow list can be reached). Pick a
   duration, optionally lock the session so it cannot be stopped early, and start. Also from the
-  terminal: `bin/tracker focus start --mode distracting --minutes 45 --lock`.
+  terminal: `bin/tracker focus start --mode distracting --minutes 45 --lock`. An **always blocked**
+  list of sites and apps is enforced whenever the dashboard is running, session or not, and wins
+  over the whitelist; remove an entry to unblock it (`bin/tracker focus add always tiktok.com`,
+  `focus add alwaysapp Steam`). Set a **lock password** (Focus tab, or `bin/tracker focus lock`)
+  and removing always-blocked entries, `tracker stop`, `tracker uninstall` and
+  `focus clear-proxy` all require it. The password is stored as a salted PBKDF2 hash, attempts are
+  throttled, and there is no recovery other than editing the database.
 - **Settings**: idle threshold, context-switch detection parameters, backup folder, export CSV,
   daemon health (whether window titles and URLs are actually arriving).
 

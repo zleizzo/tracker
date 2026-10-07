@@ -12,6 +12,9 @@ Modes:
   blacklist    your own list of sites (and apps) is blocked
   distracting  the blacklist plus every site/app that a rule sorts as "distracting"
   whitelist    only sites on your allow list can be reached; blocked apps still apply
+
+The "always" lists (sites and apps) are enforced whenever the dashboard is running, session or not,
+and win over the whitelist.
 """
 import json
 import os
@@ -23,6 +26,7 @@ from urllib.parse import urlsplit
 from . import db
 
 MODES = ("blacklist", "distracting", "whitelist")
+LISTS = ("block", "allow", "app", "always", "alwaysapp")
 PAC_PATH = "/focus.pac"
 # Hosts that must always work (local dashboard, local network, Apple system services in whitelist mode).
 ALWAYS_DIRECT = ["localhost", "127.0.0.1", "apple.com", "icloud.com", "icloud-content.com", "apple-dns.net",
@@ -49,7 +53,7 @@ def normalize_domain(value):
 
 
 def get_lists(conn):
-    out = {"block": [], "allow": [], "app": []}
+    out = {k: [] for k in LISTS}
     for r in conn.execute("SELECT * FROM focus_sites ORDER BY lower(pattern)"):
         if r["list"] in out:
             out[r["list"]].append(dict(r))
@@ -57,16 +61,16 @@ def get_lists(conn):
 
 
 def add_site(conn, which, pattern):
-    if which not in ("block", "allow", "app"):
-        raise ValueError("list must be block, allow or app")
-    if which == "app":
+    if which not in LISTS:
+        raise ValueError("list must be one of " + ", ".join(LISTS))
+    if which in ("app", "alwaysapp"):
         value = (pattern or "").strip()
         if value.lower().endswith(".app"):
             value = value[:-4]
     else:
         value = normalize_domain(pattern)
     if not value:
-        raise ValueError("that does not look like a domain" if which != "app" else "app name is required")
+        raise ValueError("that does not look like a domain" if which not in ("app", "alwaysapp") else "app name is required")
     existing = conn.execute("SELECT id FROM focus_sites WHERE list = ? AND lower(pattern) = lower(?)", (which, value)).fetchone()
     if existing:
         return dict(conn.execute("SELECT * FROM focus_sites WHERE id = ?", (existing["id"],)).fetchone())
@@ -161,10 +165,14 @@ def effective_state(conn):
     lists = get_lists(conn)
     session = active_session(conn)
     settings = db.get_settings(conn)
-    state = {"active": bool(session), "mode": None, "until": None, "session_id": None, "locked": False,
-             "block": [], "allow": [], "apps": [], "proxy_port": int(settings.get("focus_proxy_port") or 7897),
-             "updated": time.time()}
+    always = [r["pattern"] for r in lists["always"]]
+    always_apps = [r["pattern"] for r in lists["alwaysapp"]]
+    state = {"active": bool(session) or bool(always or always_apps), "mode": None, "until": None, "session_id": None,
+             "locked": False, "block": [], "allow": [], "apps": list(always_apps), "always": always, "always_apps": always_apps,
+             "proxy_port": int(settings.get("focus_proxy_port") or 7897), "updated": time.time()}
     if not session:
+        if state["active"]:
+            state["mode"] = "always"
         return state
     block = [r["pattern"] for r in lists["block"]]
     apps = [r["pattern"] for r in lists["app"]]
@@ -173,7 +181,7 @@ def effective_state(conn):
         block = sorted(set(block) | set(extra["domains"]))
         apps = sorted(set(apps) | set(extra["apps"]))
     state.update(mode=session["mode"], until=session["end"], session_id=session["id"], locked=bool(session["locked"]),
-                 block=block, allow=[r["pattern"] for r in lists["allow"]], apps=apps)
+                 block=block, allow=[r["pattern"] for r in lists["allow"]], apps=sorted(set(apps) | set(always_apps)))
     return state
 
 
@@ -184,8 +192,11 @@ def pac_text(state):
     proxy = "PROXY 127.0.0.1:%d" % state["proxy_port"]
     block = json.dumps(sorted(set(state["block"])))
     allow = json.dumps(sorted(set(state["allow"]) | set(ALWAYS_DIRECT)))
+    always = json.dumps(sorted(set(state.get("always") or [])))
     mode = state["mode"]
-    return f'''// Tracker focus session ({mode}) until {time.strftime("%H:%M", time.localtime(state["until"]))}
+    until = time.strftime("%H:%M", time.localtime(state["until"])) if state.get("until") else "removed from the always list"
+    return f'''// Tracker focus ({mode}) until {until}
+var ALWAYS = {always};
 var BLOCK = {block};
 var ALLOW = {allow};
 var MODE = "{mode}";
@@ -200,6 +211,8 @@ function FindProxyForURL(url, host) {{
   host = host.toLowerCase();
   if (isPlainHostName(host) || dnsDomainIs(host, ".local") || host == "localhost") return "DIRECT";
   if (/^(127\\.|10\\.|192\\.168\\.|169\\.254\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.|\\[?::1\\]?$|fe80:|fd)/.test(host)) return "DIRECT";
+  if (matches(host, ALWAYS)) return "{proxy}";
+  if (MODE == "always") return "DIRECT";
   if (MODE == "whitelist") return matches(host, ALLOW) ? "DIRECT" : "{proxy}";
   return matches(host, BLOCK) ? "{proxy}" : "DIRECT";
 }}
@@ -207,11 +220,11 @@ function FindProxyForURL(url, host) {{
 
 
 def block_page(state, url=""):
-    until = time.strftime("%H:%M", time.localtime(state["until"])) if state.get("until") else ""
+    until = time.strftime("%H:%M", time.localtime(state["until"])) if state.get("until") else "you remove it from the always-blocked list"
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>Blocked by Tracker</title>
 <style>body{{font:16px/1.5 system-ui,-apple-system,sans-serif;background:#f9f9f7;color:#0b0b0b;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}
 .b{{max-width:460px;padding:32px;background:#fcfcfb;border:1px solid rgba(11,11,11,.1);border-radius:12px}}h1{{font-size:22px;margin:0 0 8px}}p{{margin:6px 0;color:#52514e}}code{{background:#f3f2ee;padding:2px 6px;border-radius:4px}}</style></head>
-<body><div class="b"><h1>Blocked during focus</h1><p>Mode: <b>{state.get('mode')}</b> · ends at <b>{until}</b></p><p><code>{url[:120]}</code></p>
+<body><div class="b"><h1>{"Always blocked" if state.get("mode") == "always" else "Blocked during focus"}</h1><p>Mode: <b>{state.get('mode')}</b> · until <b>{until}</b></p><p><code>{url[:120]}</code></p>
 <p>Manage the session at <a href="http://127.0.0.1:7898/#focus">the dashboard</a>.</p></div></body></html>"""
 
 
@@ -301,6 +314,17 @@ def clear_pac(is_ours, services=None):
     return changed
 
 
+def effective_proxy_ok(pac_url):
+    """One cheap call: is the system's current (primary) proxy config our PAC, enabled?"""
+    try:
+        out = _run(["scutil", "--proxy"], timeout=5).stdout
+    except Exception:
+        return False
+    enabled = re.search(r"ProxyAutoConfigEnable\s*:\s*1", out)
+    url = re.search(r"ProxyAutoConfigURLString\s*:\s*(\S+)", out)
+    return bool(enabled and url and url.group(1) == pac_url)
+
+
 def applied_services(is_ours, services=None):
     services = services if services is not None else network_services()
     out = []
@@ -349,7 +373,7 @@ class Enforcer:
         return bool(url) and url.startswith(self.base)
 
     def pac_url(self, state):
-        v = hashlib.sha1(json.dumps([state.get("session_id"), state.get("mode"), state.get("until"), state.get("block"), state.get("allow")], sort_keys=True).encode()).hexdigest()[:10]
+        v = hashlib.sha1(json.dumps([state.get("session_id"), state.get("mode"), state.get("until"), state.get("block"), state.get("allow"), state.get("always")], sort_keys=True).encode()).hexdigest()[:10]
         return f"{self.base}?v={v}"
 
     def tick(self):
@@ -363,8 +387,9 @@ class Enforcer:
                 if self.dry_run:
                     self.status.update(applied=True, services=["(dry run)"])
                 else:
-                    changed = apply_pac(url, self.is_ours)
-                    if changed or not self.status.get("services"):
+                    # Steady state costs one scutil call; the per-service walk only runs when something is off.
+                    if not effective_proxy_ok(url) or not self.status.get("services"):
+                        apply_pac(url, self.is_ours)
                         self.status["services"] = applied_services(self.is_ours)
                     self.status["applied"] = bool(self.status["services"])
                     if self.state["apps"]:
@@ -383,3 +408,72 @@ class Enforcer:
             self.status["last_error"] = f"{type(e).__name__}: {e}"
         self.status["last_check"] = time.time()
         return self.status
+
+
+# -- lock password for the always-blocked lists --------------------------------
+
+import hmac as _hmac
+import secrets as _secrets
+
+SECRET_SETTINGS = {"always_lock_hash", "always_lock_salt"}
+ALWAYS_LISTS = ("always", "alwaysapp")
+_PBKDF2_ROUNDS = 200_000
+_fail_times = []
+
+
+def lock_is_set(conn):
+    r = conn.execute("SELECT value FROM settings WHERE key = 'always_lock_hash'").fetchone()
+    return bool(r and r[0])
+
+
+def _hash(password, salt):
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ROUNDS).hex()
+
+
+def set_lock(conn, password, current=None):
+    """Set or change the password. Changing requires the current one."""
+    if lock_is_set(conn) and not verify_password(conn, current or ""):
+        raise PermissionError("current password is wrong")
+    if not password or len(password) < 4:
+        raise ValueError("use at least 4 characters")
+    salt = _secrets.token_bytes(16)
+    db.set_setting(conn, "always_lock_salt", salt.hex())
+    db.set_setting(conn, "always_lock_hash", _hash(password, salt))
+
+
+def clear_lock(conn, password):
+    if not verify_password(conn, password or ""):
+        raise PermissionError("password is wrong")
+    conn.execute("DELETE FROM settings WHERE key IN ('always_lock_hash', 'always_lock_salt')")
+    conn.commit()
+
+
+class TooManyAttempts(Exception):
+    pass
+
+
+def verify_password(conn, password):
+    """Constant-time check with a small throttle: 5 failures per minute, half a second per failure."""
+    now = time.time()
+    while _fail_times and _fail_times[0] < now - 60:
+        _fail_times.pop(0)
+    if len(_fail_times) >= 5:
+        raise TooManyAttempts("too many wrong attempts; wait a minute")
+    rows = {r[0]: r[1] for r in conn.execute("SELECT key, value FROM settings WHERE key IN ('always_lock_hash', 'always_lock_salt')")}
+    if not rows.get("always_lock_hash"):
+        return True
+    ok = _hmac.compare_digest(_hash(password or "", bytes.fromhex(rows["always_lock_salt"])), rows["always_lock_hash"])
+    if not ok:
+        _fail_times.append(now)
+        time.sleep(0.5)
+    return ok
+
+
+def require_password(conn, password):
+    """Raise PermissionError unless the lock is unset or the password matches."""
+    if not lock_is_set(conn):
+        return
+    if not password:
+        raise PermissionError("the always-blocked list is locked: password required")
+    if not verify_password(conn, password):
+        raise PermissionError("wrong password")

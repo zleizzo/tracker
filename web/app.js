@@ -513,7 +513,8 @@ async function refreshStatus() {
     text = l.kind === 'active' ? `Tracking · ${l.app || '?'}${l.domain ? ' · ' + l.domain : ''}` : (l.kind === 'locked' ? 'Locked' : 'Idle');
   }
   box.append(el('span', { class: `dot ${cls}` }), text);
-  if (s.focus && s.focus.active) box.appendChild(el('a', { href: '#focus', class: 'pill', style: 'color:var(--ink);font-weight:600', text: `⦿ Focus · ${fmtDur(Math.max(0, s.focus.until - s.now), { minutesOnly: true })} left` }));
+  if (s.focus && s.focus.active && s.focus.until) box.appendChild(el('a', { href: '#focus', class: 'pill', style: 'color:var(--ink);font-weight:600', text: `⦿ Focus · ${fmtDur(Math.max(0, s.focus.until - s.now), { minutesOnly: true })} left` }));
+  else if (s.focus && s.focus.always) box.appendChild(el('a', { href: '#focus', class: 'pill', title: 'Always-blocked list is being enforced', text: '⦿ always-block on' }));
   const c = s.counts || {};
   if (s.daemon_running && c.active_recent > 0 && c.titles_recent === 0) {
     box.appendChild(el('a', { href: '#settings', class: 'pill', text: '⚠ no window titles — grant Accessibility', style: 'color:var(--bad)' }));
@@ -986,10 +987,12 @@ async function renderFocus() {
   const wrap = el('div');
   const now = Date.now() / 1000;
   const distractingDomains = f.distracting.domains, distractingApps = f.distracting.apps;
+  const alwaysN = f.lists.always.length + f.lists.alwaysapp.length;
+  const plusAlways = alwaysN ? ` · + ${alwaysN} always` : '';
   const counts = {
-    blacklist: `${f.lists.block.length} site${f.lists.block.length === 1 ? '' : 's'} · ${f.lists.app.length} app${f.lists.app.length === 1 ? '' : 's'}`,
+    blacklist: `${f.lists.block.length} site${f.lists.block.length === 1 ? '' : 's'} · ${f.lists.app.length} app${f.lists.app.length === 1 ? '' : 's'}${plusAlways}`,
     distracting: `${new Set([...f.lists.block.map(r => r.pattern), ...distractingDomains]).size} sites · ${new Set([...f.lists.app.map(r => r.pattern), ...distractingApps]).size} apps`,
-    whitelist: `${f.lists.allow.length} allowed site${f.lists.allow.length === 1 ? '' : 's'}`,
+    whitelist: `${f.lists.allow.length} allowed site${f.lists.allow.length === 1 ? '' : 's'}${plusAlways}`,
   };
 
   // hero: running session or start form
@@ -1010,6 +1013,10 @@ async function renderFocus() {
         : el('button', { class: 'btn danger', text: 'Stop session', onclick: async () => { if (confirm('End the focus session now?')) { await api.post('/api/focus/stop', {}); toast('Focus session stopped'); render(); } } })));
   } else {
     hero.appendChild(el('div', { class: 'card-head' }, el('h2', { text: 'Start a focus session' }), el('span', { class: 'sub', text: 'blocks websites system-wide (every browser, incognito too) for a set time' })));
+    if (st.active && st.mode === 'always') {
+      const applied = enf.dry_run ? 'dry run' : (enf.applied ? `proxy config active on ${enf.services.join(', ')}` : 'applying proxy config…');
+      hero.appendChild(el('p', { class: `small ${enf.last_error ? 'err' : 'muted'}`, style: 'margin-bottom:10px', text: enf.last_error ? `Enforcement error: ${enf.last_error}` : `Always-on blocking is active: ${f.lists.always.length} site${f.lists.always.length === 1 ? '' : 's'}, ${f.lists.alwaysapp.length} app${f.lists.alwaysapp.length === 1 ? '' : 's'} · ${applied}` }));
+    }
     let mode = store('focusMode') || 'blacklist';
     let minutes = store('focusMinutes') || 25;
     const modeCards = el('div', { class: 'mode-cards' });
@@ -1026,7 +1033,7 @@ async function renderFocus() {
       el('div', { style: 'margin-top:12px;display:flex;gap:10px;align-items:center' },
         el('button', { class: 'btn primary', text: 'Start focus', onclick: async () => {
           if (mode === 'whitelist' && !f.lists.allow.length && !confirm('Your allow list is empty: every website would be blocked. Start anyway?')) return;
-          if (mode === 'blacklist' && !f.lists.block.length && !f.lists.app.length) { toast('Add something to the blacklist first', true); return; }
+          if (mode === 'blacklist' && !f.lists.block.length && !f.lists.app.length && !alwaysN) { toast('Add something to the blacklist first', true); return; }
           await api.post('/api/focus/start', { mode, minutes, locked: lockCb.checked }); toast('Focus started'); render(); refreshStatus();
         } }),
         enf.last_error ? el('span', { class: 'err small', text: enf.last_error }) : null));
@@ -1047,6 +1054,67 @@ async function renderFocus() {
     c.append(ul, form);
     return c;
   };
+  const always = el('div', { class: 'card span2', style: 'border-color:color-mix(in srgb, var(--bad) 45%, var(--border))' });
+  const locked = !!(f.lock && f.lock.set);
+  always.appendChild(el('div', { class: 'card-head' }, el('h2', { text: 'Always blocked' }), el('span', { class: 'sub', text: 'enforced whenever the dashboard is running, session or not · wins over the whitelist' }),
+    el('div', { class: 'tools' }, locked
+      ? el('span', { class: 'f small' }, '🔒 password required to remove entries', el('button', { class: 'btn ghost small', text: 'Change password', onclick: () => openLockModal(true) }))
+      : el('button', { class: 'btn small', text: '🔓 Set a lock password', title: 'Entries can then only be removed with the password', onclick: () => openLockModal(false) }))));
+  const removeAlways = r => {
+    if (!locked) { if (confirm(`Unblock ${r.pattern}?`)) api.del(`/api/focus/sites/${r.id}`).then(render); return; }
+    openModal(`Unblock ${r.pattern}`, close => {
+      const pw = el('input', { type: 'password', class: 'input', autocomplete: 'current-password', placeholder: 'lock password' });
+      const err = el('div', { class: 'err' });
+      return el('form', { class: 'form', onsubmit: async e => {
+        e.preventDefault();
+        try {
+          const res = await fetch(`/api/focus/sites/${r.id}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw.value }) });
+          const data = await res.json();
+          if (!res.ok) { err.textContent = data.error || `${res.status}`; return; }
+          close(); toast(`${r.pattern} unblocked`); render();
+        } catch (ex) { err.textContent = ex.message; }
+      } },
+        el('p', { class: 'muted small', text: 'This entry is on the always-blocked list. Enter the lock password to remove it.' }),
+        field('Password', pw), err,
+        el('div', { class: 'actions' }, el('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: close }), el('button', { type: 'submit', class: 'btn danger', text: 'Unblock' })));
+    });
+  };
+  function openLockModal(changing) {
+    openModal(changing ? 'Change the lock password' : 'Set a lock password', close => {
+      const cur = el('input', { type: 'password', class: 'input', autocomplete: 'current-password' });
+      const pw = el('input', { type: 'password', class: 'input', autocomplete: 'new-password' });
+      const pw2 = el('input', { type: 'password', class: 'input', autocomplete: 'new-password' });
+      const err = el('div', { class: 'err' });
+      const post = async (method, body) => { const res = await fetch('/api/focus/lock', { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await res.json(); if (!res.ok) throw new Error(data.error || `${res.status}`); return data; };
+      return el('form', { class: 'form', onsubmit: async e => {
+        e.preventDefault();
+        if (pw.value !== pw2.value) { err.textContent = 'Passwords do not match'; return; }
+        try { await post('POST', { password: pw.value, current: cur.value }); close(); toast('Lock password set'); render(); } catch (ex) { err.textContent = ex.message; }
+      } },
+        el('p', { class: 'muted small', text: 'With a lock password, entries on the always-blocked list can only be removed by entering it. It also protects "tracker stop", "uninstall" and "focus clear-proxy" in the terminal. There is no recovery if you forget it (short of editing the database).' }),
+        changing ? field('Current password', cur) : null,
+        el('div', { class: 'row' }, field('New password', pw), field('Repeat', pw2)), err,
+        el('div', { class: 'actions' },
+          changing ? el('button', { type: 'button', class: 'btn danger left', text: 'Remove lock', onclick: async () => { try { await post('DELETE', { password: cur.value }); close(); toast('Lock removed'); render(); } catch (ex) { err.textContent = ex.message; } } }) : null,
+          el('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: close }), el('button', { type: 'submit', class: 'btn primary', text: changing ? 'Change' : 'Set password' })));
+    });
+  }
+  const twoCol = el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px' });
+  const sub = (title, which, rows, placeholder, datalist) => {
+    const box = el('div');
+    box.appendChild(el('h3', { text: title, style: 'margin-bottom:6px' }));
+    const ul = el('div', { class: 'site-list' });
+    if (!rows.length) ul.appendChild(el('div', { class: 'muted small', text: 'Nothing here yet.' }));
+    for (const r of rows) ul.appendChild(el('div', { class: 'site' }, el('span', { text: r.pattern }), el('button', { class: 'x', text: locked ? '🔒' : '✕', title: locked ? 'Unblock (password required)' : 'Unblock', onclick: () => removeAlways(r) })));
+    const inp = el('input', { type: 'text', class: 'input', placeholder, style: 'flex:1', list: datalist ? `dl-${which}` : null });
+    const form = el('form', { class: 'inline-form', style: 'margin-top:8px', onsubmit: async e => { e.preventDefault(); if (!inp.value.trim()) return; try { await api.post('/api/focus/sites', { list: which, pattern: inp.value.trim() }); inp.value = ''; render(); } catch (err) { /* toast shown by api */ } } }, inp, el('button', { type: 'submit', class: 'btn small', text: 'Block always' }));
+    if (datalist) form.appendChild(el('datalist', { id: `dl-${which}` }, datalist.map(v => el('option', { value: v }))));
+    box.append(ul, form);
+    return box;
+  };
+  twoCol.append(sub('Sites', 'always', f.lists.always, 'tiktok.com or a URL'), sub('Apps', 'alwaysapp', f.lists.alwaysapp, 'Steam', f.recent_apps));
+  always.appendChild(twoCol);
+  grid.appendChild(always);
   grid.appendChild(listCard('Blacklist', 'sites blocked in blacklist and distracting modes', 'block', f.lists.block, 'youtube.com or a URL'));
   grid.appendChild(listCard('Blocked apps', 'quit automatically while any session runs', 'app', f.lists.app, 'Discord', f.recent_apps));
   grid.appendChild(listCard('Whitelist', 'the only sites reachable in whitelist mode (local network and Apple services always work)', 'allow', f.lists.allow, 'overleaf.com'));
@@ -1078,7 +1146,8 @@ async function renderFocus() {
     el('li', {}, 'Blocked hosts are sent to a local proxy on 127.0.0.1 that refuses them; HTTPS pages show the browser\'s "proxy connection failed" error, plain HTTP shows a block page. Everything else goes direct and never touches the proxy.'),
     el('li', {}, 'The setting is re-applied every few seconds, so switching it off in System Settings does not help; it is restored when the session ends (or with ', el('code', { text: 'tracker focus clear-proxy' }), ').'),
     el('li', {}, 'Blocked apps are quit every few seconds while a session runs. In whitelist mode every app that uses the system proxy is limited to the allow list, so add the domains Slack, Spotify or your mail need.'),
-    el('li', {}, 'Tabs that were already open keep their current page until they load something new. Sites matching a domain include all its subdomains.')));
+    el('li', {}, 'Tabs that were already open keep their current page until they load something new. Sites matching a domain include all its subdomains.'),
+    el('li', {}, 'The always-blocked lists are enforced for as long as the dashboard runs (it starts at login). Stopping it with ', el('code', { text: 'tracker stop' }), ' lifts them; with a lock password set, that command, ', el('code', { text: 'tracker uninstall' }), ', ', el('code', { text: 'focus clear-proxy' }), ' and removing entries all ask for the password.')));
   grid2.appendChild(how);
   wrap.appendChild(grid2);
   return wrap;

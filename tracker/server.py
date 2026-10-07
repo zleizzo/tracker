@@ -150,12 +150,13 @@ def api_status(conn, q, body):
           count(*) AS segment_count, min(start) AS first_start
         FROM segments""", (recent, recent, recent, *BROWSERS, recent, *BROWSERS))
     path = db.db_path()
-    settings = db.get_settings(conn)
+    settings = {k: v for k, v in db.get_settings(conn).items() if k not in focus.SECRET_SETTINGS}
     fstate = focus.effective_state(conn)
     return {
         "version": __version__,
         "now": now,
-        "focus": {"active": fstate["active"], "mode": fstate["mode"], "until": fstate["until"], "locked": fstate["locked"]},
+        "focus": {"active": fstate["active"], "mode": fstate["mode"], "until": fstate["until"], "locked": fstate["locked"],
+                  "always": bool(fstate.get("always") or fstate.get("always_apps"))},
         "daemon_running": daemon_running(),
         "paused": settings.get("paused") == "1",
         "last_segment": last,
@@ -607,6 +608,7 @@ def _focus_payload(conn):
         "distracting": focus.distracting_from_rules(conn),
         "history": focus.history(conn),
         "enforcer": ENFORCER.status if ENFORCER else None,
+        "lock": {"set": focus.lock_is_set(conn)},
         "recent_apps": [r["app"] for r in conn.execute(
             "SELECT app, sum(end - start) AS s FROM segments WHERE kind = 'active' AND app IS NOT NULL AND end > ? GROUP BY app ORDER BY s DESC LIMIT 30",
             (time.time() - 14 * 86400,))],
@@ -669,9 +671,44 @@ def api_focus_site_add(conn, q, body):
 
 @route("DELETE", r"/api/focus/sites/(\d+)")
 def api_focus_site_delete(conn, q, body, sid):
+    row = db.one(conn, "SELECT * FROM focus_sites WHERE id = ?", (int(sid),))
+    if not row:
+        raise ApiError("not found", 404)
+    if row["list"] in focus.ALWAYS_LISTS:
+        try:
+            focus.require_password(conn, (body or {}).get("password") or q.get("password") or "")
+        except focus.TooManyAttempts as e:
+            raise ApiError(str(e), 429)
+        except PermissionError as e:
+            raise ApiError(str(e), 401)
     out = _delete(conn, "focus_sites", int(sid))
     _enforce_now()
     return out
+
+
+@route("POST", r"/api/focus/lock")
+def api_focus_lock_set(conn, q, body):
+    body = body or {}
+    try:
+        focus.set_lock(conn, body.get("password") or "", body.get("current") or "")
+    except focus.TooManyAttempts as e:
+        raise ApiError(str(e), 429)
+    except PermissionError as e:
+        raise ApiError(str(e), 401)
+    except ValueError as e:
+        raise ApiError(str(e))
+    return {"set": True}
+
+
+@route("DELETE", r"/api/focus/lock")
+def api_focus_lock_clear(conn, q, body):
+    try:
+        focus.clear_lock(conn, (body or {}).get("password") or "")
+    except focus.TooManyAttempts as e:
+        raise ApiError(str(e), 429)
+    except PermissionError as e:
+        raise ApiError(str(e), 401)
+    return {"set": False}
 
 
 @route("GET", r"/focus\.pac")
@@ -739,9 +776,13 @@ def start_focus_services(dashboard_port):
 
 # -- settings / control --------------------------------------------------------
 
+def _public_settings(conn):
+    return {k: v for k, v in db.get_settings(conn).items() if k not in focus.SECRET_SETTINGS}
+
+
 @route("GET", r"/api/settings")
 def api_settings(conn, q, body):
-    return db.get_settings(conn)
+    return _public_settings(conn)
 
 
 @route("PUT", r"/api/settings")
@@ -751,7 +792,7 @@ def api_settings_update(conn, q, body):
         if k not in db.DEFAULT_SETTINGS:
             raise ApiError(f"unknown setting '{k}'")
         db.set_setting(conn, k, "" if v is None else str(v))
-    return db.get_settings(conn)
+    return _public_settings(conn)
 
 
 @route("POST", r"/api/pause")
@@ -831,7 +872,7 @@ class Handler(BaseHTTPRequestHandler):
             path = parsed.path
             q = {k: v[-1] for k, v in parse_qs(parsed.query, keep_blank_values=True).items()}
             body = None
-            if method in ("POST", "PUT"):
+            if method in ("POST", "PUT", "DELETE"):
                 n = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(n) if n else b""
                 try:

@@ -135,6 +135,8 @@ If you rebuild the daemon later, macOS treats it as a new app: re-enable it unde
 
 
 def cmd_uninstall(args):
+    with closing(db.connect()) as conn:
+        _require_lock_password(conn, None, "uninstalling (lifts always-blocking)")
     _clear_focus_proxy()
     bootout(DAEMON_LABEL)
     bootout(DASH_LABEL)
@@ -168,6 +170,8 @@ def _clear_focus_proxy():
 
 
 def cmd_stop(args):
+    with closing(db.connect()) as conn:
+        _require_lock_password(conn, None, "stopping the tracker (lifts always-blocking)")
     _clear_focus_proxy()
     bootout(DAEMON_LABEL)
     bootout(DASH_LABEL)
@@ -296,8 +300,9 @@ def cmd_set(args):
 
 
 def cmd_get(args):
+    from . import focus
     with closing(db.connect()) as conn:
-        s = db.get_settings(conn)
+        s = {k: v for k, v in db.get_settings(conn).items() if k not in focus.SECRET_SETTINGS}
     if args.key:
         print(s.get(args.key, ""))
     else:
@@ -309,6 +314,20 @@ def cmd_pause(args):
     with closing(db.connect()) as conn:
         db.set_setting(conn, "paused", "0" if args.resume else "1")
     print("resumed" if args.resume else "paused (the daemon picks this up within 10s)")
+
+
+def _require_lock_password(conn, given=None, why="this"):
+    """Ask for the always-list lock password (if one is set) before an operation that lifts blocking."""
+    from . import focus
+    if not focus.lock_is_set(conn):
+        return
+    import getpass
+    pw = given if given is not None else getpass.getpass(f"Lock password required for {why}: ")
+    try:
+        if not focus.verify_password(conn, pw):
+            sys.exit("wrong password")
+    except focus.TooManyAttempts as e:
+        sys.exit(str(e))
 
 
 def cmd_focus(args):
@@ -350,11 +369,31 @@ def cmd_focus(args):
             enforcer.tick()
             print(f"added {row['pattern']} to the {args.list} list")
         elif sub == "remove":
+            if args.list in focus.ALWAYS_LISTS:
+                _require_lock_password(conn, args.password, f"removing {args.pattern} from the always-blocked list")
             cur = conn.execute("DELETE FROM focus_sites WHERE list = ? AND lower(pattern) = lower(?)", (args.list, args.pattern.strip()))
             conn.commit()
             enforcer.tick()
             print("removed" if cur.rowcount else "not found")
+        elif sub == "lock":
+            import getpass
+            if args.off:
+                focus.clear_lock(conn, args.password if args.password is not None else getpass.getpass("Current lock password: "))
+                print("lock removed")
+                return
+            current = None
+            if focus.lock_is_set(conn):
+                current = args.password if args.password is not None else getpass.getpass("Current lock password: ")
+            new = getpass.getpass("New lock password: ")
+            if new != getpass.getpass("Repeat: "):
+                sys.exit("passwords do not match")
+            try:
+                focus.set_lock(conn, new, current)
+            except (PermissionError, ValueError) as e:
+                sys.exit(f"error: {e}")
+            print("lock password set: removing always-blocked entries, `tracker stop`, `uninstall` and `focus clear-proxy` now require it")
         elif sub == "clear-proxy":
+            _require_lock_password(conn, args.password, "clearing the proxy config")
             changed = focus.clear_pac(enforcer.is_ours)
             print(f"proxy config cleared on: {', '.join(changed) or 'nothing (none of ours was applied)'}")
         else:  # status / list
@@ -367,6 +406,7 @@ def cmd_focus(args):
             else:
                 print("focus: no session running")
             print(f"  applied on: {', '.join(focus.applied_services(enforcer.is_ours)) or 'none'}")
+            print(f"  always:     {', '.join(r['pattern'] for r in lists['always'] + lists['alwaysapp']) or '-'}")
             print(f"  blacklist:  {', '.join(r['pattern'] for r in lists['block']) or '-'}")
             print(f"  apps:       {', '.join(r['pattern'] for r in lists['app']) or '-'}")
             print(f"  whitelist:  {', '.join(r['pattern'] for r in lists['allow']) or '-'}")
@@ -435,14 +475,19 @@ def main(argv=None):
     f.add_argument("--force", action="store_true", help="stop even if locked")
     f = fs.add_parser("extend", help="extend the running session")
     f.add_argument("minutes", type=float)
-    f = fs.add_parser("add", help="add a site or app to a list")
-    f.add_argument("list", choices=("block", "allow", "app"))
+    f = fs.add_parser("add", help="add a site or app to a list (always/alwaysapp = blocked at all times)")
+    f.add_argument("list", choices=("block", "allow", "app", "always", "alwaysapp"))
     f.add_argument("pattern")
     f = fs.add_parser("remove", help="remove a site or app from a list")
-    f.add_argument("list", choices=("block", "allow", "app"))
+    f.add_argument("list", choices=("block", "allow", "app", "always", "alwaysapp"))
     f.add_argument("pattern")
+    f.add_argument("--password", help="lock password (prompted if omitted)")
+    f = fs.add_parser("lock", help="set or change the password that protects the always-blocked list")
+    f.add_argument("--off", action="store_true", help="remove the lock")
+    f.add_argument("--password", help="current password (prompted if omitted)")
     fs.add_parser("status", help="session, lists and where the proxy config is applied")
-    fs.add_parser("clear-proxy", help="emergency: remove our proxy config from all network services")
+    f = fs.add_parser("clear-proxy", help="emergency: remove our proxy config from all network services")
+    f.add_argument("--password", help="lock password (prompted if omitted)")
     s.set_defaults(fn=cmd_focus, focus_cmd="status")
     s = sub.add_parser("log", help="show the daemon log")
     s.add_argument("-n", "--lines", type=int, default=40)
