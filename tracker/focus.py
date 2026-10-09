@@ -96,6 +96,81 @@ def distracting_from_rules(conn):
     return {"domains": sorted(domains), "apps": sorted(apps)}
 
 
+# -- unblocked hours for the always list -----------------------------------------
+
+from datetime import datetime as _dt, timedelta as _td
+
+_HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def _mins(hhmm):
+    m = _HHMM.match((hhmm or "").strip())
+    if not m:
+        raise ValueError(f"time must be HH:MM, got {hhmm!r}")
+    return int(m.group(1)) * 60 + int(m.group(2))
+
+
+def normalize_windows(windows):
+    """Validate [{start, end, days}] -> clean list. end <= start means the window crosses midnight."""
+    out = []
+    for w in windows or []:
+        start, end = _mins(w.get("start")), _mins(w.get("end"))
+        if start == end:
+            raise ValueError("a window must not be empty")
+        days = w.get("days")
+        if days in (None, "", "all"):
+            days = list(range(7))
+        clean = []
+        for d in days:
+            if isinstance(d, str):
+                d = DAY_NAMES.index(d[:3].lower()) if d[:3].lower() in DAY_NAMES else int(d)
+            if 0 <= int(d) <= 6 and int(d) not in clean:
+                clean.append(int(d))
+        if not clean:
+            raise ValueError("pick at least one weekday")
+        out.append({"start": f"{start // 60:02d}:{start % 60:02d}", "end": f"{end // 60:02d}:{end % 60:02d}", "days": sorted(clean)})
+    return out
+
+
+def parse_windows(settings):
+    try:
+        return normalize_windows(json.loads(settings.get("always_allow_windows") or "[]"))
+    except (ValueError, TypeError):
+        return []
+
+
+def in_allowed_window(windows, now=None):
+    """True while the always list is paused (local time)."""
+    if not windows:
+        return False
+    t = _dt.fromtimestamp(now) if now else _dt.now()
+    minute, wd, yesterday = t.hour * 60 + t.minute, t.weekday(), (t.weekday() - 1) % 7
+    for w in windows:
+        start, end = _mins(w["start"]), _mins(w["end"])
+        if end > start:
+            if wd in w["days"] and start <= minute < end:
+                return True
+        else:  # crosses midnight
+            if (wd in w["days"] and minute >= start) or (yesterday in w["days"] and minute < end):
+                return True
+    return False
+
+
+def next_window_change(windows, now=None):
+    """Timestamp of the next minute at which in_allowed_window flips (within 8 days), else None."""
+    if not windows:
+        return None
+    now = now or time.time()
+    base = _dt.fromtimestamp(now).replace(second=0, microsecond=0)
+    state = in_allowed_window(windows, now)
+    for i in range(1, 8 * 24 * 60 + 1):
+        t = (base + _td(minutes=i)).timestamp()
+        if in_allowed_window(windows, t) != state:
+            return t
+    return None
+
+
 # -- sessions ------------------------------------------------------------------
 
 def active_session(conn, now=None):
@@ -165,10 +240,16 @@ def effective_state(conn):
     lists = get_lists(conn)
     session = active_session(conn)
     settings = db.get_settings(conn)
-    always = [r["pattern"] for r in lists["always"]]
-    always_apps = [r["pattern"] for r in lists["alwaysapp"]]
+    windows = parse_windows(settings)
+    paused = in_allowed_window(windows)
+    always_all = [r["pattern"] for r in lists["always"]]
+    always_apps_all = [r["pattern"] for r in lists["alwaysapp"]]
+    always = [] if paused else always_all
+    always_apps = [] if paused else always_apps_all
     state = {"active": bool(session) or bool(always or always_apps), "mode": None, "until": None, "session_id": None,
              "locked": False, "block": [], "allow": [], "apps": list(always_apps), "always": always, "always_apps": always_apps,
+             "always_paused": paused, "always_windows": windows, "always_next_change": next_window_change(windows),
+             "always_configured": bool(always_all or always_apps_all),
              "proxy_port": int(settings.get("focus_proxy_port") or 7897), "updated": time.time()}
     if not session:
         if state["active"]:
@@ -416,6 +497,7 @@ import hmac as _hmac
 import secrets as _secrets
 
 SECRET_SETTINGS = {"always_lock_hash", "always_lock_salt"}
+PROTECTED_SETTINGS = {"always_allow_windows"}   # changeable only through the focus API / CLI, behind the lock password
 ALWAYS_LISTS = ("always", "alwaysapp")
 _PBKDF2_ROUNDS = 200_000
 _fail_times = []

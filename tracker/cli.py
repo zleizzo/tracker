@@ -1,5 +1,6 @@
 """`tracker` command line: install/uninstall the background daemon, run the dashboard, export, backup."""
 import argparse
+import json
 import os
 import plistlib
 import shutil
@@ -294,6 +295,9 @@ def cmd_backup(args):
 def cmd_set(args):
     if args.key not in db.DEFAULT_SETTINGS:
         sys.exit(f"unknown setting '{args.key}'. Known: {', '.join(db.DEFAULT_SETTINGS)}")
+    from . import focus
+    if args.key in focus.PROTECTED_SETTINGS:
+        sys.exit(f"'{args.key}' is managed by `tracker focus hours` (it may require the lock password)")
     with closing(db.connect()) as conn:
         db.set_setting(conn, args.key, args.value)
     print(f"{args.key} = {args.value}")
@@ -392,6 +396,33 @@ def cmd_focus(args):
             except (PermissionError, ValueError) as e:
                 sys.exit(f"error: {e}")
             print("lock password set: removing always-blocked entries, `tracker stop`, `uninstall` and `focus clear-proxy` now require it")
+        elif sub == "hours":
+            windows = focus.parse_windows(db.get_settings(conn))
+            if args.hours_cmd == "add":
+                _require_lock_password(conn, args.password, "changing the unblocked hours")
+                try:
+                    start, end = args.range.split("-")
+                    days = [d.strip() for d in args.days.split(",")] if args.days else None
+                    windows = focus.normalize_windows(windows + [{"start": start, "end": end, "days": days}])
+                except ValueError as e:
+                    sys.exit(f"error: {e} (use HH:MM-HH:MM, e.g. 19:00-23:00)")
+                db.set_setting(conn, "always_allow_windows", json.dumps(windows))
+                enforcer.tick()
+            elif args.hours_cmd == "remove":
+                _require_lock_password(conn, args.password, "changing the unblocked hours")
+                if not (1 <= args.index <= len(windows)):
+                    sys.exit("no such window; `tracker focus hours` lists them with their numbers")
+                windows.pop(args.index - 1)
+                db.set_setting(conn, "always_allow_windows", json.dumps(windows))
+                enforcer.tick()
+            if not windows:
+                print("always-blocked list is enforced 24/7 (no unblocked hours)")
+            for i, w in enumerate(windows, 1):
+                days = "every day" if len(w["days"]) == 7 else ", ".join(focus.DAY_NAMES[d].capitalize() for d in w["days"])
+                print(f"  {i}. {w['start']}–{w['end']}  {days}")
+            paused = focus.in_allowed_window(windows)
+            nxt = focus.next_window_change(windows)
+            print(f"  now: {'paused (unblocked)' if paused else 'blocking'}" + (f", changes at {datetime.fromtimestamp(nxt):%a %H:%M}" if nxt else ""))
         elif sub == "clear-proxy":
             _require_lock_password(conn, args.password, "clearing the proxy config")
             changed = focus.clear_pac(enforcer.is_ours)
@@ -406,12 +437,53 @@ def cmd_focus(args):
             else:
                 print("focus: no session running")
             print(f"  applied on: {', '.join(focus.applied_services(enforcer.is_ours)) or 'none'}")
-            print(f"  always:     {', '.join(r['pattern'] for r in lists['always'] + lists['alwaysapp']) or '-'}")
+            st = focus.effective_state(conn)
+            print(f"  always:     {', '.join(r['pattern'] for r in lists['always'] + lists['alwaysapp']) or '-'}"
+                  + ("  [paused by unblocked hours" + (f" until {datetime.fromtimestamp(st['always_next_change']):%H:%M}" if st.get("always_next_change") else "") + "]" if st.get("always_paused") else ""))
             print(f"  blacklist:  {', '.join(r['pattern'] for r in lists['block']) or '-'}")
             print(f"  apps:       {', '.join(r['pattern'] for r in lists['app']) or '-'}")
             print(f"  whitelist:  {', '.join(r['pattern'] for r in lists['allow']) or '-'}")
             d = focus.distracting_from_rules(conn)
             print(f"  distracting (from rules): {', '.join(d['domains'] + d['apps']) or '-'}")
+
+
+def cmd_reflections(args):
+    from . import reflect
+    with closing(db.connect()) as conn:
+        if args.export:
+            n = reflect.export_all(conn)
+            print(f"wrote {n} file(s) to {reflect.export_dir()}")
+            return
+        if args.json:
+            rows = reflect.list_entries(conn, args.since)
+            for r in rows:
+                r["stats"] = reflect.day_stats(conn, r["day"])
+            print(json.dumps(rows, indent=2, ensure_ascii=False))
+            return
+        out = reflect.render_all(conn, args.since)
+        print(out if out else f"no reflections yet (they live in {reflect.export_dir()})")
+
+
+def cmd_reflect(args):
+    from . import reflect
+    day = args.day or datetime.now().strftime("%Y-%m-%d")
+    text = args.text
+    if text is None:
+        if sys.stdin.isatty():
+            print(f"Reflection for {day}. Type your text, then Ctrl-D on an empty line:")
+        text = sys.stdin.read()
+    with closing(db.connect()) as conn:
+        try:
+            e = reflect.save(conn, day, text, args.rating)
+        except ValueError as err:
+            sys.exit(f"error: {err}")
+    print(f"saved reflection for {e['day']} -> {reflect.export_dir()}/{e['day']}.md")
+
+
+def cmd_notify(args):
+    from . import notify
+    ok = notify.send("Tracker", args.message or "Notifications are working.", "Test")
+    print("notification posted" if ok else "could not post a notification")
 
 
 def cmd_log(args):
@@ -486,9 +558,32 @@ def main(argv=None):
     f.add_argument("--off", action="store_true", help="remove the lock")
     f.add_argument("--password", help="current password (prompted if omitted)")
     fs.add_parser("status", help="session, lists and where the proxy config is applied")
+    f = fs.add_parser("hours", help="hours during which the always-blocked list is NOT enforced")
+    hs = f.add_subparsers(dest="hours_cmd")
+    h = hs.add_parser("add", help="add a window, e.g. 19:00-23:00 [--days mon,tue,wed]")
+    h.add_argument("range")
+    h.add_argument("--days", help="comma-separated weekdays (default every day)")
+    h.add_argument("--password")
+    h = hs.add_parser("remove", help="remove window number N")
+    h.add_argument("index", type=int)
+    h.add_argument("--password")
+    f.set_defaults(hours_cmd="list")
     f = fs.add_parser("clear-proxy", help="emergency: remove our proxy config from all network services")
     f.add_argument("--password", help="lock password (prompted if omitted)")
     s.set_defaults(fn=cmd_focus, focus_cmd="status")
+    s = sub.add_parser("reflections", help="print all daily reflections as Markdown (for review or analysis)")
+    s.add_argument("--since", help="YYYY-MM-DD")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--export", action="store_true", help="(re)write the Markdown files and index")
+    s.set_defaults(fn=cmd_reflections)
+    s = sub.add_parser("reflect", help="write today's reflection (text from --text or stdin)")
+    s.add_argument("day", nargs="?")
+    s.add_argument("--text")
+    s.add_argument("--rating", type=int)
+    s.set_defaults(fn=cmd_reflect)
+    s = sub.add_parser("notify", help="post a test notification")
+    s.add_argument("message", nargs="?")
+    s.set_defaults(fn=cmd_notify)
     s = sub.add_parser("log", help="show the daemon log")
     s.add_argument("-n", "--lines", type=int, default=40)
     s.add_argument("-f", "--follow", action="store_true")

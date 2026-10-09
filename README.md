@@ -78,12 +78,20 @@ re-tick it under Accessibility.
   terminal: `bin/tracker focus start --mode distracting --minutes 45 --lock`. An **always blocked**
   list of sites and apps is enforced whenever the dashboard is running, session or not, and wins
   over the whitelist; remove an entry to unblock it (`bin/tracker focus add always tiktok.com`,
-  `focus add alwaysapp Steam`). Set a **lock password** (Focus tab, or `bin/tracker focus lock`)
-  and removing always-blocked entries, `tracker stop`, `tracker uninstall` and
+  `focus add alwaysapp Steam`). **Unblocked hours** pause the always list on a schedule, e.g.
+  19:00–23:00 every day or Fri/Sat 22:30–01:00 (`bin/tracker focus hours add 19:00-23:00
+  --days mon,tue,wed,thu,fri`); blocking resumes automatically at the end of the window. Set a
+  **lock password** (Focus tab, or `bin/tracker focus lock`) and removing always-blocked
+  entries, changing the unblocked hours, `tracker stop`, `tracker uninstall` and
   `focus clear-proxy` all require it. The password is stored as a salted PBKDF2 hash, attempts are
   throttled, and there is no recovery other than editing the database.
+- **Journal**: an end-of-day reflection per day (free text plus an optional 1–5 rating), shown
+  next to that day's numbers. Every save also writes a Markdown file, see below.
+- **Notifications**: a macOS notification a few minutes before each planned block starts (lead
+  time in Settings, 0 = at start) and a daily reminder to write the reflection if none exists yet.
+  Clicking a notification does not open the dashboard; it is posted by the system's script runner.
 - **Settings**: idle threshold, context-switch detection parameters, backup folder, export CSV,
-  daemon health (whether window titles and URLs are actually arriving).
+  notifications, daemon health (whether window titles and URLs are actually arriving).
 
 ## How the blocker works (and why it holds)
 
@@ -101,6 +109,22 @@ terminal only: `bin/tracker focus stop --force` and `bin/tracker focus clear-pro
 Caveats: a tab that is already showing a blocked page keeps it until it loads something new;
 whitelist mode limits every app that honours the system proxy, so add the domains your chat,
 music or mail apps need; command-line tools that ignore proxy settings are not affected.
+
+## Daily reflections, for later review
+
+Reflections live in the database and are mirrored to `~/Library/Application Support/Tracker/reflections/`:
+one `YYYY-MM-DD.md` per day plus an `index.md`. Each file starts with a YAML front matter holding
+the day's statistics at the time of the last save (tracked hours by category, productive share,
+switches, breaks, top projects, apps and sites, plan blocks and adherence, focus sessions), then the
+reflection text under a heading. To hand the whole journal to a tool or an assistant for analysis:
+
+```sh
+bin/tracker reflections                    # every reflection as one Markdown document
+bin/tracker reflections --since 2026-10-01 # or a range
+bin/tracker reflections --json             # structured, with the same statistics
+bin/tracker reflections --export           # regenerate the files (e.g. after editing rules)
+bin/tracker reflect --rating 4 --text "…"  # write today's from the terminal (or pipe stdin)
+```
 
 ## Plans and estimates
 

@@ -345,3 +345,14 @@ table.data td.trunc { max-width: 380px; overflow: hidden; text-overflow: ellipsi
 .site span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .site .x { opacity: 0.5; background: none; border: 0; cursor: pointer; color: var(--muted); }
 .site:hover .x { opacity: 1; }
+
+/* journal */
+.rating { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
+.rating .star { background: none; border: 0; cursor: pointer; font-size: 22px; color: var(--grid); padding: 0 2px; line-height: 1; }
+.rating .star.on { color: var(--s4); }
+textarea.journal { width: 100%; min-height: 220px; resize: vertical; font-size: 15px; line-height: 1.5; padding: 12px; }
+.jrow { display: grid; grid-template-columns: 110px 90px 1fr; gap: 12px; align-items: baseline; padding: 8px 4px; border-bottom: 1px solid var(--grid); color: var(--ink); }
+.jrow:hover { background: var(--surface-2); }
+.jrow .jday { color: var(--ink-2); font-size: 13px; }
+.jrow .jstars { color: var(--s4); font-size: 13px; letter-spacing: 1px; }
+.jrow .jtext { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

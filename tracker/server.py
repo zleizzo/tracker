@@ -12,7 +12,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__, analytics, db, focus
+from . import __version__, analytics, db, focus, notify, reflect
 from .analytics import Filters, parse_time, range_bounds
 from .classify import BROWSERS, CATEGORIES, FIELD_SPECIFICITY
 
@@ -156,7 +156,8 @@ def api_status(conn, q, body):
         "version": __version__,
         "now": now,
         "focus": {"active": fstate["active"], "mode": fstate["mode"], "until": fstate["until"], "locked": fstate["locked"],
-                  "always": bool(fstate.get("always") or fstate.get("always_apps"))},
+                  "always": bool(fstate.get("always") or fstate.get("always_apps")), "always_paused": fstate.get("always_paused"),
+                  "always_configured": fstate.get("always_configured"), "always_next_change": fstate.get("always_next_change")},
         "daemon_running": daemon_running(),
         "paused": settings.get("paused") == "1",
         "last_segment": last,
@@ -686,6 +687,24 @@ def api_focus_site_delete(conn, q, body, sid):
     return out
 
 
+@route("PUT", r"/api/focus/always-hours")
+def api_focus_always_hours(conn, q, body):
+    """Hours during which the always list is not blocked. Protected by the lock password when one is set."""
+    body = body or {}
+    try:
+        focus.require_password(conn, body.get("password") or "")
+        windows = focus.normalize_windows(body.get("windows") or [])
+    except focus.TooManyAttempts as e:
+        raise ApiError(str(e), 429)
+    except PermissionError as e:
+        raise ApiError(str(e), 401)
+    except (ValueError, TypeError, AttributeError) as e:
+        raise ApiError(str(e))
+    db.set_setting(conn, "always_allow_windows", json.dumps(windows))
+    _enforce_now()
+    return _focus_payload(conn)
+
+
 @route("POST", r"/api/focus/lock")
 def api_focus_lock_set(conn, q, body):
     body = body or {}
@@ -774,6 +793,58 @@ def start_focus_services(dashboard_port):
     return ENFORCER
 
 
+# -- reflections & notifications -------------------------------------------------
+
+NOTIFIER = None
+
+
+def _reflection_payload(conn, day):
+    entry = reflect.get(conn, day)
+    return {"day": day, "entry": entry, "stats": reflect.day_stats(conn, day), "path": os.path.join(reflect.export_dir(), f"{day}.md") if entry else None}
+
+
+@route("GET", r"/api/reflections")
+def api_reflections(conn, q, body):
+    try:
+        rows = reflect.list_entries(conn, q.get("since") or None, q.get("limit") or None)
+    except ValueError as e:
+        raise ApiError(str(e))
+    return {"entries": rows, "dir": reflect.export_dir()}
+
+
+@route("GET", r"/api/reflections/(\d{4}-\d{2}-\d{2})")
+def api_reflection(conn, q, body, day):
+    try:
+        return _reflection_payload(conn, day)
+    except ValueError as e:
+        raise ApiError(str(e))
+
+
+@route("PUT", r"/api/reflections/(\d{4}-\d{2}-\d{2})")
+def api_reflection_save(conn, q, body, day):
+    body = body or {}
+    try:
+        reflect.save(conn, day, body.get("text") or "", body.get("rating"))
+    except ValueError as e:
+        raise ApiError(str(e))
+    return _reflection_payload(conn, day)
+
+
+@route("DELETE", r"/api/reflections/(\d{4}-\d{2}-\d{2})")
+def api_reflection_delete(conn, q, body, day):
+    if not reflect.delete(conn, day):
+        raise ApiError("not found", 404)
+    return {"ok": True}
+
+
+@route("POST", r"/api/notify/test")
+def api_notify_test(conn, q, body):
+    ok = notify.send("Tracker", (body or {}).get("message") or "Notifications are working.", "Test")
+    if not ok:
+        raise ApiError("could not post a notification (osascript failed)", 500)
+    return {"ok": True}
+
+
 # -- settings / control --------------------------------------------------------
 
 def _public_settings(conn):
@@ -791,6 +862,8 @@ def api_settings_update(conn, q, body):
     for k, v in body.items():
         if k not in db.DEFAULT_SETTINGS:
             raise ApiError(f"unknown setting '{k}'")
+        if k in focus.PROTECTED_SETTINGS:
+            raise ApiError(f"'{k}' can only be changed on the Focus tab (it may need the lock password)")
         db.set_setting(conn, k, "" if v is None else str(v))
     return _public_settings(conn)
 
@@ -929,6 +1002,8 @@ def serve(port=None, host="127.0.0.1"):
     httpd.daemon_threads = True
     print(f"tracker dashboard listening on http://{host}:{port}/  (db: {db.db_path()})", flush=True)
     start_focus_services(port)
+    global NOTIFIER
+    NOTIFIER = notify.start_notifier()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

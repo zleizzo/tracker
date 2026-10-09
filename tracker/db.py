@@ -89,6 +89,13 @@ CREATE TABLE IF NOT EXISTS focus_sites (
   pattern TEXT NOT NULL,
   created_at REAL
 );
+CREATE TABLE IF NOT EXISTS reflections (
+  day TEXT PRIMARY KEY,             -- YYYY-MM-DD
+  text TEXT NOT NULL DEFAULT '',
+  rating INTEGER,                   -- 1..5, optional
+  created_at REAL,
+  updated_at REAL
+);
 CREATE TABLE IF NOT EXISTS assignments (
   id INTEGER PRIMARY KEY,
   start REAL NOT NULL,
@@ -113,6 +120,10 @@ DEFAULT_SETTINGS = {
     "backup_dir": "",                  # e.g. ~/Library/Mobile Documents/com~apple~CloudDocs/Tracker
     "paused": "0",
     "focus_proxy_port": "7897",        # local port of the blocking proxy that blocked requests are sent to
+    "always_allow_windows": "[]",      # JSON: [{"start":"19:00","end":"23:00","days":[0,1,2,3,4,5,6]}] hours when the always list is NOT blocked
+    "notifications": "1",              # macOS notifications on/off
+    "plan_notify_minutes": "5",        # notify this many minutes before a planned block starts (0 = at start, empty = off)
+    "reflection_reminder_time": "18:00",  # daily reminder to write the reflection (HH:MM, empty = off)
 }
 
 CATEGORIES = ("productive", "neutral", "distracting")

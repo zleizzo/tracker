@@ -241,7 +241,7 @@ function bindFilters() {
 function currentView() {
   const h = location.hash.replace(/^#/, '') || 'overview';
   const [view, ...rest] = h.split('/');
-  return { view: ['overview', 'timeline', 'plan', 'focus', 'projects', 'sort', 'trends', 'settings'].includes(view) ? view : 'overview', arg: rest.join('/') };
+  return { view: ['overview', 'timeline', 'plan', 'focus', 'journal', 'projects', 'sort', 'trends', 'settings'].includes(view) ? view : 'overview', arg: rest.join('/') };
 }
 
 // ---------------------------------------------------------------------------
@@ -515,6 +515,7 @@ async function refreshStatus() {
   box.append(el('span', { class: `dot ${cls}` }), text);
   if (s.focus && s.focus.active && s.focus.until) box.appendChild(el('a', { href: '#focus', class: 'pill', style: 'color:var(--ink);font-weight:600', text: `⦿ Focus · ${fmtDur(Math.max(0, s.focus.until - s.now), { minutesOnly: true })} left` }));
   else if (s.focus && s.focus.always) box.appendChild(el('a', { href: '#focus', class: 'pill', title: 'Always-blocked list is being enforced', text: '⦿ always-block on' }));
+  else if (s.focus && s.focus.always_configured && s.focus.always_paused) box.appendChild(el('a', { href: '#focus', class: 'pill', title: 'Unblocked hours', text: `○ always-block paused${s.focus.always_next_change ? ' until ' + fmtClock(s.focus.always_next_change) : ''}` }));
   const c = s.counts || {};
   if (s.daemon_running && c.active_recent > 0 && c.titles_recent === 0) {
     box.appendChild(el('a', { href: '#settings', class: 'pill', text: '⚠ no window titles — grant Accessibility', style: 'color:var(--bad)' }));
@@ -538,7 +539,7 @@ async function render() {
   try {
     if (!projectsCache.length || view === 'projects' || view === 'sort') projectsCache = (await api.get('/api/projects')).projects;
     syncFilterControls();
-    const node = await ({ overview: renderOverview, timeline: renderTimeline, plan: renderPlan, focus: renderFocus, projects: renderProjects, sort: renderSort, trends: renderTrends, settings: renderSettings })[view](arg);
+    const node = await ({ overview: renderOverview, timeline: renderTimeline, plan: renderPlan, focus: renderFocus, journal: renderJournal, projects: renderProjects, sort: renderSort, trends: renderTrends, settings: renderSettings })[view](arg);
     if (token !== renderToken) return;
     main.innerHTML = '';
     main.appendChild(node);
@@ -574,7 +575,7 @@ const catSeries = CAT_ORDER.map(c => ({ key: c, label: catLabel(c), color: catCo
 const dayLabel = d => { const dt = new Date(d.day + 'T12:00:00'); return `${WD[d.weekday].slice(0, 2)} ${dt.getDate()}`; };
 
 async function renderOverview() {
-  const s = await api.get('/api/summary?' + filterQuery());
+  const [s, refl] = await Promise.all([api.get('/api/summary?' + filterQuery()), api.get(`/api/reflections?since=${todayIso()}`)]);
   const t = s.totals, [from, to] = rangeDates();
   const multiDay = s.per_day.length > 1;
   const activeDays = s.per_day.filter(d => d.productive + d.neutral + d.distracting + d.switching > 0).length || 1;
@@ -589,6 +590,11 @@ async function renderOverview() {
     tile({ label: 'Breaks', value: fmtDur(t.idle), delta: t.manual ? `${fmtDur(t.manual)} logged manually` : 'idle time between first and last activity' }),
     s.plan && s.plan.planned > 0 ? tile({ label: 'On plan', value: s.plan.adherence == null ? '—' : `${Math.round(100 * s.plan.adherence)}%`, delta: `${fmtDur(s.plan.on_plan)} of ${fmtDur(s.plan.elapsed)} planned · ${s.plan.days} day${s.plan.days === 1 ? '' : 's'}` }) : null,
   ));
+  const hasReflection = refl.entries.some(e => e.day === todayIso() && e.text);
+  if (!hasReflection && new Date().getHours() >= 16) {
+    wrap.appendChild(el('a', { href: '#journal', class: 'card', style: 'display:flex;align-items:center;gap:12px;margin-bottom:16px;border-color:color-mix(in srgb, var(--accent) 45%, var(--border))' },
+      el('span', { style: 'font-size:22px', text: '✎' }), el('span', {}, el('b', { text: 'Write today\'s reflection' }), el('span', { class: 'muted', text: ' — a few lines on how the day went. They are saved as Markdown for later review.' }))));
+  }
   const grid = el('div', { class: 'grid' });
   wrap.appendChild(grid);
   if (multiDay) {
@@ -1013,6 +1019,9 @@ async function renderFocus() {
         : el('button', { class: 'btn danger', text: 'Stop session', onclick: async () => { if (confirm('End the focus session now?')) { await api.post('/api/focus/stop', {}); toast('Focus session stopped'); render(); } } })));
   } else {
     hero.appendChild(el('div', { class: 'card-head' }, el('h2', { text: 'Start a focus session' }), el('span', { class: 'sub', text: 'blocks websites system-wide (every browser, incognito too) for a set time' })));
+    if (st.always_configured && st.always_paused) {
+      hero.appendChild(el('p', { class: 'small muted', style: 'margin-bottom:10px', text: `Always-on blocking is paused by your unblocked hours${st.always_next_change ? ' until ' + fmtClock(st.always_next_change) : ''}.` }));
+    }
     if (st.active && st.mode === 'always') {
       const applied = enf.dry_run ? 'dry run' : (enf.applied ? `proxy config active on ${enf.services.join(', ')}` : 'applying proxy config…');
       hero.appendChild(el('p', { class: `small ${enf.last_error ? 'err' : 'muted'}`, style: 'margin-bottom:10px', text: enf.last_error ? `Enforcement error: ${enf.last_error}` : `Always-on blocking is active: ${f.lists.always.length} site${f.lists.always.length === 1 ? '' : 's'}, ${f.lists.alwaysapp.length} app${f.lists.alwaysapp.length === 1 ? '' : 's'} · ${applied}` }));
@@ -1114,6 +1123,49 @@ async function renderFocus() {
   };
   twoCol.append(sub('Sites', 'always', f.lists.always, 'tiktok.com or a URL'), sub('Apps', 'alwaysapp', f.lists.alwaysapp, 'Steam', f.recent_apps));
   always.appendChild(twoCol);
+  // unblocked hours
+  const windows = st.always_windows || [];
+  const dayLabel = days => (days.length === 7 ? 'every day' : days.map(d => WD[d]).join(', '));
+  const putHours = async (next, password) => {
+    const res = await fetch('/api/focus/always-hours', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ windows: next, password: password || '' }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `${res.status}`);
+  };
+  const withPassword = (title, apply) => {
+    if (!locked) { apply('').then(() => { toast('Unblocked hours saved'); render(); }).catch(e => toast(e.message, true)); return; }
+    openModal(title, close => {
+      const pw = el('input', { type: 'password', class: 'input', placeholder: 'lock password' });
+      const err = el('div', { class: 'err' });
+      return el('form', { class: 'form', onsubmit: async e => { e.preventDefault(); try { await apply(pw.value); close(); toast('Unblocked hours saved'); render(); } catch (ex) { err.textContent = ex.message; } } },
+        el('p', { class: 'muted small', text: 'Changing the unblocked hours needs the lock password.' }), field('Password', pw), err,
+        el('div', { class: 'actions' }, el('button', { type: 'button', class: 'btn', text: 'Cancel', onclick: close }), el('button', { type: 'submit', class: 'btn primary', text: 'Save' })));
+    });
+  };
+  const hoursBox = el('div', { style: 'margin-top:14px;border-top:1px solid var(--grid);padding-top:12px' });
+  const statusText = !windows.length ? 'Enforced around the clock.' : (st.always_paused ? `Paused right now${st.always_next_change ? ' · blocking resumes ' + fmtClock(st.always_next_change) : ''}.` : `Blocking now${st.always_next_change ? ' · next unblocked window starts ' + fmtClock(st.always_next_change) : ''}.`);
+  hoursBox.appendChild(el('div', { style: 'display:flex;align-items:baseline;gap:10px;flex-wrap:wrap' }, el('h3', { text: 'Unblocked hours' }), el('span', { class: 'muted small', text: `${statusText} During these windows the always-blocked sites and apps are reachable.` })));
+  const wl = el('div', { class: 'site-list', style: 'margin-top:6px' });
+  for (let i = 0; i < windows.length; i++) {
+    const w = windows[i];
+    wl.appendChild(el('div', { class: 'site' }, el('span', {}, el('b', { text: `${w.start}–${w.end}` }), ` · ${dayLabel(w.days)}`),
+      el('button', { class: 'x', text: locked ? '🔒' : '✕', title: 'Remove window', onclick: () => withPassword('Remove unblocked window', pw => putHours(windows.filter((_, j) => j !== i), pw)) })));
+  }
+  if (!windows.length) wl.appendChild(el('div', { class: 'muted small', text: 'No windows yet — e.g. 19:00–23:00 every day for the evening.' }));
+  hoursBox.appendChild(wl);
+  const hStart = el('input', { type: 'time', class: 'input', value: '19:00' });
+  const hEnd = el('input', { type: 'time', class: 'input', value: '23:00' });
+  const daySet = new Set([0, 1, 2, 3, 4, 5, 6]);
+  const dayChips = el('div', { class: 'chips' });
+  const drawDays = () => { dayChips.innerHTML = ''; WD.forEach((n, i) => dayChips.appendChild(el('button', { type: 'button', class: `chip ${daySet.has(i) ? 'on' : ''}`, text: n.slice(0, 2), onclick: () => { if (daySet.has(i)) daySet.delete(i); else daySet.add(i); drawDays(); } }))); };
+  drawDays();
+  hoursBox.appendChild(el('form', { class: 'inline-form', style: 'margin-top:8px', onsubmit: e => {
+    e.preventDefault();
+    if (!hStart.value || !hEnd.value) { toast('Pick start and end times', true); return; }
+    if (!daySet.size) { toast('Pick at least one weekday', true); return; }
+    withPassword('Add unblocked window', pw => putHours([...windows, { start: hStart.value, end: hEnd.value, days: [...daySet].sort() }], pw));
+  } }, el('span', { class: 'muted small', text: 'From' }), hStart, el('span', { class: 'muted small', text: 'to' }), hEnd, dayChips, el('button', { type: 'submit', class: 'btn small', text: locked ? 'Add (password)' : 'Add window' })));
+  hoursBox.appendChild(el('p', { class: 'muted small', style: 'margin-top:6px', text: 'An end time earlier than the start runs past midnight. Focus sessions are unaffected by these windows.' }));
+  always.appendChild(hoursBox);
   grid.appendChild(always);
   grid.appendChild(listCard('Blacklist', 'sites blocked in blacklist and distracting modes', 'block', f.lists.block, 'youtube.com or a URL'));
   grid.appendChild(listCard('Blocked apps', 'quit automatically while any session runs', 'app', f.lists.app, 'Discord', f.recent_apps));
@@ -1150,6 +1202,68 @@ async function renderFocus() {
     el('li', {}, 'The always-blocked lists are enforced for as long as the dashboard runs (it starts at login). Stopping it with ', el('code', { text: 'tracker stop' }), ' lifts them; with a lock password set, that command, ', el('code', { text: 'tracker uninstall' }), ', ', el('code', { text: 'focus clear-proxy' }), ' and removing entries all ask for the password.')));
   grid2.appendChild(how);
   wrap.appendChild(grid2);
+  return wrap;
+}
+
+// ---- journal (daily reflections) ------------------------------------------------
+async function renderJournal(arg) {
+  if (arg && /^\d{4}-\d{2}-\d{2}$/.test(arg)) { state.date = arg; history.replaceState(null, '', '#journal'); }
+  if (!state.date || state.date > todayIso()) state.date = todayIso();
+  saveFilters();
+  const [cur, all] = await Promise.all([api.get(`/api/reflections/${state.date}`), api.get('/api/reflections')]);
+  const st = cur.stats, entry = cur.entry;
+  const wrap = el('div');
+  const nav = d => { state.date = shiftIso(state.date, d); saveFilters(); render(); };
+  wrap.appendChild(el('div', { class: 'tl-head' },
+    el('button', { class: 'btn small', text: '‹', onclick: () => nav(-1) }),
+    el('button', { class: 'btn small', text: '›', disabled: state.date >= todayIso(), onclick: () => nav(1) }),
+    el('h2', { text: fmtDay(state.date, true) }),
+    el('input', { type: 'date', class: 'input', value: state.date, max: todayIso(), onchange: e => { if (e.target.value) { state.date = e.target.value; saveFilters(); render(); } } }),
+    state.date !== todayIso() ? el('button', { class: 'btn ghost small', text: 'Today', onclick: () => { state.date = todayIso(); saveFilters(); render(); } }) : null,
+    el('span', { style: 'margin-left:auto' }),
+    el('a', { class: 'btn small', href: `#timeline/${state.date}`, text: 'Timeline' }),
+    el('a', { class: 'btn small', href: `#plan/${state.date}`, text: 'Plan' })));
+
+  // the day's numbers, for context while writing
+  const bits = [`${fmtDur(st.tracked_hours * 3600)} tracked`, st.productive_pct != null ? `${st.productive_pct}% productive` : null,
+    st.switches ? `${st.switches} switches` : null, st.plan_blocks ? `plan ${st.plan_adherence_pct == null ? '—' : st.plan_adherence_pct + '%'} followed` : null,
+    st.focus_sessions ? `${st.focus_sessions} focus session${st.focus_sessions === 1 ? '' : 's'} (${st.focus_minutes}m)` : null,
+    st.projects.length ? st.projects.slice(0, 3).join(' · ') : null].filter(Boolean);
+  const editor = el('div', { class: 'card', style: 'margin-bottom:16px' });
+  editor.appendChild(el('div', { class: 'card-head' }, el('h2', { text: entry ? 'Reflection' : 'Write a reflection' }), el('span', { class: 'sub', text: bits.join(' · ') })));
+  let rating = entry ? entry.rating : null;
+  const stars = el('div', { class: 'rating' });
+  const drawStars = () => { stars.innerHTML = ''; stars.appendChild(el('span', { class: 'muted small', text: 'How did the day go?' })); for (let i = 1; i <= 5; i++) stars.appendChild(el('button', { type: 'button', class: `star ${rating != null && i <= rating ? 'on' : ''}`, text: '★', title: `${i} / 5`, onclick: () => { rating = rating === i ? null : i; drawStars(); } })); stars.appendChild(el('span', { class: 'muted small', text: rating ? `${rating} / 5` : 'optional' })); };
+  drawStars();
+  const ta = el('textarea', { class: 'input journal', placeholder: 'What did you work on? What went well? What got in the way? What would you do differently tomorrow?', text: entry ? entry.text : '' });
+  const status = el('span', { class: 'muted small', text: entry ? `saved ${fmtClock(entry.updated_at)}${cur.path ? ' · ' + cur.path.replace(/^.*\/Tracker\//, '…/Tracker/') : ''}` : 'not saved yet' });
+  const save = async () => {
+    const text = ta.value.trim();
+    if (!text && rating == null) { toast('Write something first', true); return; }
+    await api.put(`/api/reflections/${state.date}`, { text, rating }); toast('Reflection saved'); render();
+  };
+  ta.addEventListener('keydown', e => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') save(); });
+  editor.append(stars, ta, el('div', { style: 'display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap' },
+    el('button', { class: 'btn primary', text: entry ? 'Save changes' : 'Save reflection', onclick: save }),
+    el('span', { class: 'muted small', text: '⌘⏎' }), status,
+    entry ? el('button', { class: 'btn ghost small danger', style: 'margin-left:auto', text: 'Delete', onclick: async () => { if (confirm('Delete this reflection?')) { await api.del(`/api/reflections/${state.date}`); render(); } } }) : null));
+  wrap.appendChild(editor);
+
+  const grid = el('div', { class: 'grid' });
+  const list = el('div', { class: 'card span2' });
+  list.appendChild(el('div', { class: 'card-head' }, el('h2', { text: `Past reflections (${all.entries.length})` }), el('span', { class: 'sub', text: 'click to open' })));
+  if (!all.entries.length) list.appendChild(el('p', { class: 'muted', text: 'Nothing yet. Reflections are reminded at the time set in Settings and saved as Markdown files for later review.' }));
+  for (const e of all.entries) {
+    list.appendChild(el('a', { href: `#journal/${e.day}`, class: 'jrow' },
+      el('span', { class: 'jday', text: fmtDay(e.day) }),
+      el('span', { class: 'jstars', text: e.rating ? '★'.repeat(e.rating) + '☆'.repeat(5 - e.rating) : '' }),
+      el('span', { class: 'jtext', text: (e.text || '').split('\n')[0].slice(0, 160) })));
+  }
+  grid.appendChild(list);
+  grid.appendChild(el('div', { class: 'card span2' },
+    el('div', { class: 'card-head' }, el('h2', { text: 'For later review' })),
+    el('p', { class: 'muted' }, 'Every reflection is also written to ', el('code', { text: all.dir }), ' as one Markdown file per day (', el('code', { text: 'YYYY-MM-DD.md' }), ') whose front matter carries that day\'s tracked hours by category, projects, plan adherence and focus sessions, plus an ', el('code', { text: 'index.md' }), '. To hand the whole journal to a tool or an assistant: ', el('code', { text: 'bin/tracker reflections --since 2026-10-01' }), ' prints it all as Markdown (', el('code', { text: '--json' }), ' for structured data).')));
+  wrap.appendChild(grid);
   return wrap;
 }
 
@@ -1505,12 +1619,20 @@ async function renderSettings() {
     ['min_idle_gap_minutes', 'Offer to log gaps longer than (minutes)', 'Idle gaps at least this long are listed on the Timeline for "log time away".'],
     ['backup_dir', 'Backup folder', 'A consistent copy of the database is written here hourly (e.g. ~/Library/Mobile Documents/com~apple~CloudDocs/Tracker for iCloud Drive, or a Google Drive folder). Leave empty to disable.'],
     ['dashboard_port', 'Dashboard port', 'Takes effect after `tracker restart`.'],
+    ['notifications', 'Notifications', 'macOS notifications for planned blocks and the reflection reminder.'],
+    ['plan_notify_minutes', 'Planned block reminder (minutes before)', '0 notifies when the block starts; empty turns block reminders off.'],
+    ['reflection_reminder_time', 'Reflection reminder (HH:MM)', 'Daily nudge to write the reflection if none exists yet; empty turns it off.'],
   ];
+  const TEXT_KEYS = new Set(['backup_dir', 'reflection_reminder_time']);
+  const SELECT_KEYS = { notifications: [['1', 'On'], ['0', 'Off']] };
   const inputs = {};
   for (const [key, label, help] of rows) {
-    inputs[key] = el('input', { type: key === 'backup_dir' ? 'text' : 'number', class: 'input', value: s[key] ?? '', style: key === 'backup_dir' ? 'width:100%' : 'width:120px' });
+    if (SELECT_KEYS[key]) inputs[key] = select(SELECT_KEYS[key].map(([v, l]) => ({ value: v, label: l })), s[key] ?? '1', { style: 'width:120px' });
+    else inputs[key] = el('input', { type: TEXT_KEYS.has(key) ? 'text' : 'number', class: 'input', value: s[key] ?? '', style: key === 'backup_dir' ? 'width:100%' : 'width:120px' });
     form.appendChild(el('div', { class: 'row' }, el('div', {}, el('div', { text: label }), el('div', { class: 'help', text: help })), inputs[key]));
   }
+  form.appendChild(el('div', { class: 'row' }, el('div', {}, el('div', { text: 'Test notification' }), el('div', { class: 'help', text: 'Posts one now. If nothing shows, allow notifications for Script Editor in System Settings.' })),
+    el('button', { class: 'btn', text: 'Send test', onclick: async () => { await api.post('/api/notify/test', {}); toast('Notification posted'); } })));
   form.appendChild(el('div', { class: 'actions', style: 'display:flex;justify-content:flex-end;margin-top:12px' }, el('button', { class: 'btn primary', text: 'Save settings', onclick: async () => {
     const body = {}; for (const k of Object.keys(inputs)) body[k] = inputs[k].value.trim();
     await api.put('/api/settings', body); toast('Settings saved'); render();
